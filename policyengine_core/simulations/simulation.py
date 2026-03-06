@@ -238,9 +238,9 @@ class Simulation:
 
         person_entity = self.tax_benefit_system.person_entity
         entity_id_field = f"{person_entity.key}_id"
-        assert (
-            entity_id_field in data
-        ), f"Missing {entity_id_field} column in the dataset. Each person entity must have an ID array defined for ETERNITY."
+        assert entity_id_field in data, (
+            f"Missing {entity_id_field} column in the dataset. Each person entity must have an ID array defined for ETERNITY."
+        )
 
         get_eternity_array = lambda ds: (
             ds[list(ds.keys())[0]]
@@ -252,9 +252,9 @@ class Simulation:
 
         for group_entity in self.tax_benefit_system.group_entities:
             entity_id_field = f"{group_entity.key}_id"
-            assert (
-                entity_id_field in data
-            ), f"Missing {entity_id_field} column in the dataset. Each group entity must have an ID array defined for ETERNITY."
+            assert entity_id_field in data, (
+                f"Missing {entity_id_field} column in the dataset. Each group entity must have an ID array defined for ETERNITY."
+            )
 
             entity_ids = get_eternity_array(data[entity_id_field])
             builder.declare_entity(group_entity.key, entity_ids)
@@ -262,9 +262,9 @@ class Simulation:
             person_membership_id_field = (
                 f"{person_entity.key}_{group_entity.key}_id"
             )
-            assert (
-                person_membership_id_field in data
-            ), f"Missing {person_membership_id_field} column in the dataset. Each group entity must have a person membership array defined for ETERNITY."
+            assert person_membership_id_field in data, (
+                f"Missing {person_membership_id_field} column in the dataset. Each group entity must have a person membership array defined for ETERNITY."
+            )
             person_membership_ids = get_eternity_array(
                 data[person_membership_id_field]
             )

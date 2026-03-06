@@ -32,12 +32,8 @@ from policyengine_core.variables import Variable
 
 class SimulationBuilder:
     def __init__(self):
-        self.default_period: Period = (
-            None  # Simulation period used for variables when no period is defined
-        )
-        self.persons_plural: str = (
-            None  # Plural name for person entity in current tax and benefits system
-        )
+        self.default_period: Period = None  # Simulation period used for variables when no period is defined
+        self.persons_plural: str = None  # Plural name for person entity in current tax and benefits system
 
         # JSON input - Memory of known input values. Indexed by variable or axis name.
         self.input_buffer: typing.Dict[
@@ -59,9 +55,9 @@ class SimulationBuilder:
         self.has_axes = False
         self.axes_entity_counts: typing.Dict[Entity.plural, int] = {}
         self.axes_entity_ids: typing.Dict[Entity.plural, typing.List[int]] = {}
-        self.axes_memberships: typing.Dict[Entity.plural, typing.List[int]] = (
-            {}
-        )
+        self.axes_memberships: typing.Dict[
+            Entity.plural, typing.List[int]
+        ] = {}
         self.axes_roles: typing.Dict[Entity.plural, typing.List[int]] = {}
 
     def build_from_dict(
@@ -426,8 +422,7 @@ class SimulationBuilder:
             )  # Don't mutate function input
 
             roles_json = {
-                role.plural
-                or role.key: transform_to_strict_syntax(
+                role.plural or role.key: transform_to_strict_syntax(
                     variables_json.pop(role.plural or role.key, [])
                 )
                 for role in entity.roles
@@ -472,9 +467,9 @@ class SimulationBuilder:
                     persons_with_role
                 ):
                     person_index = persons_ids.index(person_id)
-                    self.memberships[entity.plural][
-                        person_index
-                    ] = entity_index
+                    self.memberships[entity.plural][person_index] = (
+                        entity_index
+                    )
                     person_role = (
                         role.subroles[index_within_role]
                         if role.subroles
@@ -600,9 +595,9 @@ class SimulationBuilder:
 
         array[instance_index] = value
 
-        self.input_buffer[variable.name][
-            str(periods.period(period_str))
-        ] = array
+        self.input_buffer[variable.name][str(periods.period(period_str))] = (
+            array
+        )
 
     def finalize_variables_init(self, population):
         # Due to set_input mechanism, we must bufferize all inputs, then actually set them,
@@ -806,9 +801,7 @@ class SimulationBuilder:
                         "min"
                     ] + mesh.reshape(cell_count) * (
                         axis["max"] - axis["min"]
-                    ) / (
-                        axis_count - 1
-                    )
+                    ) / (axis_count - 1)
                     self.input_buffer[axis_name][str(axis_period)] = array
 
         self.has_axes = True

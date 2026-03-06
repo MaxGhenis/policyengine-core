@@ -76,9 +76,7 @@ You requested computation of variable "{}", but you did not specify on which per
 When you request the computation of a variable within a formula, you must always specify the period as the second parameter. The convention is to call this parameter "period". For example:
     computed_salary = person('salary', period).
 See more information at <https://openfisca.org/doc/coding-the-legislation/35_periods.html#periods-in-variable-definition>.
-""".format(
-                    variable_name, filename, line_number, line_of_code
-                )
+""".format(variable_name, filename, line_number, line_of_code)
             )
 
     def __call__(
@@ -107,9 +105,7 @@ See more information at <https://openfisca.org/doc/coding-the-legislation/35_per
             raise ValueError(
                 "Options  config.ADD and  config.DIVIDE are incompatible (trying to compute variable {})".format(
                     variable_name
-                ).encode(
-                    "utf-8"
-                )
+                ).encode("utf-8")
             )
 
         from policyengine_core.simulations.microsimulation import (

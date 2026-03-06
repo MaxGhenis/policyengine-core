@@ -1,0 +1,4 @@
+- bump: patch
+  changes:
+    changed:
+      - Switched code formatter from black to ruff format.
