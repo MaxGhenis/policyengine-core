@@ -115,7 +115,11 @@ class Holder:
             # reform deltas. The post-C1 behavior only fell back to
             # ``default``, which broke country-package nested-branch
             # patterns that relied on the ancestor's input being visible.
-            parent = getattr(self.simulation, "parent_branch", None) if self.simulation else None
+            parent = (
+                getattr(self.simulation, "parent_branch", None)
+                if self.simulation
+                else None
+            )
             while parent is not None:
                 ancestor_value = self._memory_storage.get(period, parent.branch_name)
                 if ancestor_value is not None:
@@ -248,9 +252,7 @@ class Holder:
         if simulation is not None:
             if not hasattr(simulation, "_user_input_keys"):
                 simulation._user_input_keys = set()
-            simulation._user_input_keys.add(
-                (self.variable.name, branch_name, period)
-            )
+            simulation._user_input_keys.add((self.variable.name, branch_name, period))
         if self.variable.set_input and period.unit != self.variable.definition_period:
             return self.variable.set_input(self, period, array)
         return self._set(period, array, branch_name)
