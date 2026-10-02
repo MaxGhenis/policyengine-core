@@ -883,6 +883,24 @@ class Simulation:
                     )
                 # Check if the variable has a previously defined value
                 known_periods = holder.get_known_periods()
+                if variable.set_input is not None:
+                    # A ``set_input`` helper stores every input at the
+                    # variable's definition period (it converts an input given
+                    # for another period), so for such a variable a value at
+                    # another unit is never an input. The ones core writes are
+                    # derived from a stored value: a YEAR flow requested for a
+                    # month caches a twelfth of the year's value there
+                    # (``calculate_divide``), and a sum over several
+                    # sub-periods is cached at the larger period
+                    # (``calculate_add``). Carrying either forward rescales the
+                    # variable. Variables without a helper (DAY variables, and
+                    # any declaring ``set_input = None``) store inputs at
+                    # whatever period they are given and keep every period.
+                    known_periods = [
+                        known_period
+                        for known_period in known_periods
+                        if known_period.unit == variable.definition_period
+                    ]
                 earlier_known_periods = [
                     known_period
                     for known_period in known_periods
