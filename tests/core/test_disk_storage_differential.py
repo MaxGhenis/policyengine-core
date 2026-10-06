@@ -1,7 +1,7 @@
 """Storing holder values on disk gives the results storing them in memory gives.
 
 A Hypothesis property over random sequences of branching, cloning, inputs,
-calculations, derivatives, reforms, holder replacement and drops, run on a
+calculations, derivatives, reforms, holders made again and drops, run on a
 disk-backed and a memory-backed simulation family side by side.
 """
 
@@ -19,8 +19,13 @@ import pytest
 hypothesis = pytest.importorskip("hypothesis")
 st = hypothesis.strategies
 
+from policyengine_core.data_storage.on_disk_storage import REPLACEMENTS_DIR
 from policyengine_core.simulations import Simulation
-from tests.fixtures.disk_storage import build_simulation, unraisable_exceptions
+from tests.fixtures.disk_storage import (
+    build_simulation,
+    make_holders_again,
+    unraisable_exceptions,
+)
 
 MONTHS = ["2017-01", "2017-02"]
 NAMES = ["a", "b", "c"]
@@ -95,8 +100,7 @@ class _Family:
             (variable,) = arguments
             simulation.delete_arrays(variable)
         elif kind == "new_holders":
-            for population in simulation.populations.values():
-                population._holders = {}
+            make_holders_again(simulation)
         elif kind == "drop" and member.parent is not None:
             self.drop(member)
 
@@ -116,16 +120,53 @@ class _Family:
         del dropped, member
         gc.collect()
 
-    def missing_files(self) -> List[str]:
+    def disk_storages(self) -> list:
         return [
-            path
+            holder._disk_storage
             for member in self.members
             for population in member.simulation.populations.values()
             for holder in population._holders.values()
             if holder._disk_storage is not None
-            for path in holder._disk_storage._files.values()
+        ]
+
+    def missing_files(self) -> List[str]:
+        return [
+            path
+            for storage in self.disk_storages()
+            for path in storage._files.values()
             if not os.path.isfile(path)
         ]
+
+    def unread_replacements(self) -> List[str]:
+        """The files storages wrote instead of writing over shared ones that
+        no storage alive reads or may write again, once each family of
+        storages has removed those it may (as it does before writing a new
+        one)."""
+        # A storage whose holder is gone may still read files, kept alive by
+        # a clone of it: count every storage of each family.
+        storages = {
+            id(member): member
+            for storage in self.disk_storages()
+            for member in storage._family_storages
+        }.values()
+        for storage in storages:
+            storage._remove_unread_replacements()
+        read = {
+            path
+            for storage in storages
+            for paths in (storage._files, storage._own_paths)
+            for path in paths.values()
+        }
+        folders = {
+            os.path.join(storage.storage_dir, REPLACEMENTS_DIR) for storage in storages
+        }
+        return sorted(
+            path
+            for folder in folders
+            if os.path.isdir(folder)
+            for path in (os.path.join(folder, name) for name in os.listdir(folder))
+            if path not in read
+        )
 
 
 def _outcome(calculate):
@@ -171,12 +212,42 @@ _operations = st.lists(
     suppress_health_check=[hypothesis.HealthCheck.too_slow],
 )
 @hypothesis.given(operations=_operations)
+# Counterexamples on master 2e22c8f8. A holder made again for a variable made
+# its disk storage in the folder its earlier one used: it wrote the default it
+# calculated over the file a clone read, and the earlier storage, collected
+# with the clone, removed the folder and the new holder's files with it.
+@hypothesis.example(
+    operations=[("set", 0, "salary", "2017-01", 0), ("clone", 0), ("new_holders", 0)]
+)
+@hypothesis.example(
+    operations=[
+        ("set", 0, "salary", "2017-01", 0),
+        ("clone", 0),
+        ("new_holders", 0),
+        ("set", 0, "salary", "2017-01", 5),
+        ("drop", 1),
+    ]
+)
+# The files ``derivative``'s clone wrote instead of writing over shared ones
+# stayed on disk until the simulation was collected.
+@hypothesis.example(
+    operations=[
+        ("set", 0, "salary", "2017-01", 1),
+        ("calculate", 0, "income_tax", "2017-01"),
+        ("derivative", 0, "2017-01"),
+        ("reform", 0, 0.1),
+        ("calculate", 0, "income_tax", "2017-01"),
+    ]
+)
 def test_disk_storage_gives_the_results_memory_storage_gives(operations):
     """For any sequence of branching, cloning, inputs, calculations,
-    derivatives, reforms and drops:
+    derivatives, reforms, holders made again and drops:
 
     - every calculation returns what it returns with values held in memory;
     - every file a live storage maps is on disk;
+    - once the dropped simulations are collected, no file is left that a
+      storage wrote instead of writing over a shared one and that no live
+      storage reads, once each family has removed those it may;
     - once the simulations are gone, their directory is removed, and no
       finalizer raised.
     """
@@ -196,6 +267,9 @@ def test_disk_storage_gives_the_results_memory_storage_gives(operations):
                     ) == _outcome(
                         lambda: member_in_memory.simulation.calculate(variable, period)
                     ), (variable, period)
+
+        gc.collect()
+        assert on_disk.unread_replacements() == []
 
         directory = on_disk.members[0].simulation._data_storage_dir
         del in_memory, on_disk, member_in_memory, member_on_disk

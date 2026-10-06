@@ -17,10 +17,11 @@ on disk, starting from one simulation:
 * ``make``: a disk storage on its own is made in a new subfolder of a
   simulation's folder, preserving it or not (``preserve_storage_dir``);
 * ``nest``: a new simulation is given a simulation's folder: a new
-  subfolder of it, or the folder itself, in which case only its clone,
-  made before it stores anything, is kept (two simulations storing a
-  variable in one folder would share its subfolder). Its clones then make
-  their folders in a folder another simulation may have made;
+  subfolder of it, or the folder itself, in which case the new simulation
+  is kept, or only its clone, made before it stores anything. Two
+  simulations storing a variable in one folder each make a subfolder of
+  their own for it. Its clones then make their folders in a folder another
+  simulation may have made;
 * ``preserve``: a disk storage a simulation or ``make`` made is set to
   preserve its folder;
 * ``collect``: one simulation or disk storage on its own is dropped and the
@@ -79,6 +80,10 @@ COPIERS = {
     "copy": copy.copy,
 }
 
+# Where ``nest`` puts the new simulation: in a new subfolder of the folder, or
+# in the folder itself, keeping the simulation or only its clone.
+NESTINGS = ("inside", "itself", "clone")
+
 _index = st.integers(min_value=0, max_value=63)
 OPERATIONS = st.lists(
     st.one_of(
@@ -103,7 +108,7 @@ OPERATIONS = st.lists(
             st.sampled_from(sorted(COPIERS)),
         ),
         st.tuples(st.just("make"), _index, st.booleans()),
-        st.tuples(st.just("nest"), _index, st.booleans()),
+        st.tuples(st.just("nest"), _index, st.sampled_from(NESTINGS)),
         st.tuples(st.just("preserve"), _index, st.sampled_from(VARIABLES)),
         st.tuples(st.just("collect"), _index),
     ),
@@ -254,13 +259,15 @@ class _Run:
                 )
             )
         elif kind == "nest":
-            _, _, inside = operation
+            _, _, nesting = operation
             folder = target.simulation.data_storage_dir
-            if inside:
+            if nesting == "inside":
                 self.made += 1
                 folder = os.path.join(folder, f"nested_{self.made}")
                 os.mkdir(folder)
                 self.given.append(folder)
+                nested = disk_simulation(folder)
+            elif nesting == "itself":
                 nested = disk_simulation(folder)
             else:
                 nested = clone(disk_simulation(folder))
@@ -334,7 +341,7 @@ def _check_left(root, given, preserved):
 # collected. The derandomized examples need not include either.
 @example(
     operations=[
-        ("nest", 0, True),
+        ("nest", 0, "inside"),
         ("collect", 0),
         ("set", 0, VARIABLES[0], YEARS[0], 0),
     ],
@@ -342,11 +349,31 @@ def _check_left(root, given, preserved):
 )
 @example(
     operations=[
-        ("nest", 0, False),
+        ("nest", 0, "clone"),
         ("collect", 0),
         ("set", 0, VARIABLES[0], YEARS[0], 0),
     ],
     caller_chooses_the_folder=False,
+)
+# Two simulations storing a variable in one folder shared its subfolder:
+# each read the other's values, and the first collected removed the other's
+# files. With the folder made by the first simulation or chosen by the
+# caller.
+@example(
+    operations=[
+        ("nest", 0, "itself"),
+        ("set_every", YEARS[0], 0),
+        ("collect", 1),
+    ],
+    caller_chooses_the_folder=False,
+)
+@example(
+    operations=[
+        ("nest", 0, "itself"),
+        ("set_every", YEARS[0], 0),
+        ("collect", 0),
+    ],
+    caller_chooses_the_folder=True,
 )
 def test_storage_folders_keep_what_is_read_and_leave_only_what_is_preserved(
     operations, caller_chooses_the_folder
