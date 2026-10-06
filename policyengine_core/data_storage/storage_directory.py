@@ -71,12 +71,14 @@ files guarantees:
   gone, with everything in it, the forked process's own folder included,
   even while a forked or unpickling process still reads them. Explicit
   preservation is likewise kept only by the process that made the folder.
-* **A folder the caller chose** (``_data_storage_dir``). Nothing removes it,
-  only the subfolders disk storages made in it, as before, unless it is in a
-  folder a simulation made: that one removes it with everything else in it,
-  once nothing keeps that one alive (above). A clone or forked process makes
-  its own folder inside it. Several simulations may be given it: each
-  holder's disk storage takes a subfolder of its own there (above).
+* **A folder the caller chose** (``_data_storage_dir``). It is made if it
+  does not exist yet, when the simulation, or a clone of it, first needs it.
+  Nothing removes it, only the subfolders disk storages made in it, as
+  before, unless it is in a folder a simulation made: that one removes it
+  with everything else in it, once nothing keeps that one alive (above). A
+  clone or forked process makes its own folder inside it. Several
+  simulations may be given it: each holder's disk storage takes a subfolder
+  of its own there (above).
 * **A process that ends without running the exit handlers that remove its
   folders** (killed, or ended with ``os._exit``, as a process
   ``multiprocessing`` forks is) leaves the folders it made that were still

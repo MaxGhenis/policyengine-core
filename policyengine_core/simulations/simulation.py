@@ -712,18 +712,19 @@ class Simulation:
         Folder in which this simulation stores values on disk when memory is
         short (see ``MemoryConfig``).
 
-        Set ``_data_storage_dir`` to choose the folder: nothing removes it,
-        unless it is in a temporary folder a simulation made, which this
-        simulation then keeps alive, and which removes it with everything else
-        in it once nothing keeps it. Otherwise this is a new temporary folder,
-        removed once this simulation, every disk storage in the folder (those
-        its clones and branches copied included), every simulation given a
-        folder in it and every temporary folder made in it are
-        garbage-collected in this process, or at interpreter exit, except the
-        subfolders of disk storages that preserve theirs. In a process forked
-        from the one the folder is for, this is a new folder for that process,
-        made inside that one. See the ``storage_directory`` module for what
-        this guarantees.
+        Set ``_data_storage_dir`` to choose the folder, made if it does not
+        exist yet: nothing removes it, unless it is in a temporary folder a
+        simulation made, which this simulation then keeps alive, and which
+        removes it with everything else in it once nothing keeps it.
+        Otherwise this is a new temporary folder, removed once this
+        simulation, every disk storage in the folder (those its clones and
+        branches copied included), every simulation given a folder in it and
+        every temporary folder made in it are garbage-collected in this
+        process, or at interpreter exit, except the subfolders of disk
+        storages that preserve theirs. In a process forked from the one the
+        folder is for, this is a new folder for that process, made inside
+        that one. See the ``storage_directory`` module for what this
+        guarantees.
         """
         pid = os.getpid()
         if self._data_storage_dir is not None and self._storage_dir_pid not in (
@@ -744,10 +745,18 @@ class Simulation:
             if os.path.isdir(inherited):
                 self._storage_dir_parent = inherited
         if self._data_storage_dir is None:
-            self._storage_directory = TemporaryStorageDirectory(
-                self._storage_dir_parent
-            )
+            parent = self._storage_dir_parent
+            if parent is not None and directory_containing(parent) is None:
+                # The folder the caller chose for the simulation this one was
+                # cloned from, which may not exist yet (see below). A folder
+                # in a temporary one a simulation made is never made again
+                # here: that one removes it.
+                os.makedirs(parent, exist_ok=True)
+            self._storage_directory = TemporaryStorageDirectory(parent)
             self._data_storage_dir = self._storage_directory.path
+        elif not self._made_data_storage_dir():
+            # A folder the caller chose, made if it does not exist yet.
+            os.makedirs(self._data_storage_dir, exist_ok=True)
         self._storage_dir_pid = pid
         return self._data_storage_dir
 
