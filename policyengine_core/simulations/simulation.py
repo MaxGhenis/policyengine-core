@@ -175,6 +175,28 @@ from policyengine_core.simulations.simulation_macro_cache import (
 )
 
 
+def _chosen_folder_exists(path: str, keeper) -> bool:
+    """Whether ``path``, a folder the caller chose for storing values on disk,
+    exists, once made if it does not exist yet.
+
+    Only the folder itself is made, not the folders leading to it. Nor is it
+    made if ``keeper``, the temporary folder a simulation made that is or
+    contains it, is gone (in a process forked from the one that made that
+    one, say): nothing would remove it.
+    """
+    if os.path.isdir(path):
+        return True
+    if keeper is not None and not os.path.isdir(keeper.path):
+        return False
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        pass
+    except FileNotFoundError:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class PreservedUserInput:
     variable_name: str
@@ -234,6 +256,11 @@ class Simulation:
     # The folder that one is made in; ``None`` for the default temporary
     # folder (see ``clone``).
     _storage_dir_parent: str = None
+    # Whether the caller chose ``_storage_dir_parent``, as the folder of the
+    # simulation this one was cloned from, rather than a simulation making
+    # it: only a folder the caller chose is made if it does not exist (see
+    # ``data_storage_dir``).
+    _storage_dir_parent_chosen: bool = False
     # The process ``_data_storage_dir`` is for: the one that made the
     # simulation or the folder, or first stored a value on disk in it.
     _storage_dir_pid: int = None
@@ -712,10 +739,12 @@ class Simulation:
         Folder in which this simulation stores values on disk when memory is
         short (see ``MemoryConfig``).
 
-        Set ``_data_storage_dir`` to choose the folder, made if it does not
-        exist yet: nothing removes it, unless it is in a temporary folder a
-        simulation made, which this simulation then keeps alive, and which
-        removes it with everything else in it once nothing keeps it.
+        Set ``_data_storage_dir`` to choose the folder. It is made whenever
+        this simulation, a clone of it or a process forked from it needs it
+        and it does not exist, but not the folders leading to it. Nothing
+        removes it, unless it is in a temporary folder a simulation made,
+        which this simulation then keeps alive, and which removes it with
+        everything else in it once nothing keeps it.
         Otherwise this is a new temporary folder, removed once this
         simulation, every disk storage in the folder (those its clones and
         branches copied included), every simulation given a folder in it and
@@ -740,23 +769,34 @@ class Simulation:
             # ends. The disk storages this process has copies of still read
             # the other's files (see ``OnDiskStorage._path_to_write``).
             inherited = self._data_storage_dir
+            chosen = not self._made_data_storage_dir()
+            keeper = self._storage_dir_keeper
             self._data_storage_dir = None
             self._storage_directory = None
-            if os.path.isdir(inherited):
+            if (
+                _chosen_folder_exists(inherited, keeper)
+                if chosen
+                else os.path.isdir(inherited)
+            ):
                 self._storage_dir_parent = inherited
+                self._storage_dir_parent_chosen = chosen
         if self._data_storage_dir is None:
             parent = self._storage_dir_parent
-            if parent is not None and directory_containing(parent) is None:
-                # The folder the caller chose for the simulation this one was
-                # cloned from, which may not exist yet (see below). A folder
-                # in a temporary one a simulation made is never made again
-                # here: that one removes it.
-                os.makedirs(parent, exist_ok=True)
+            if parent is not None and not (
+                _chosen_folder_exists(parent, self._storage_dir_keeper)
+                if self._storage_dir_parent_chosen
+                else os.path.isdir(parent)
+            ):
+                # A folder a simulation made, now gone: in a process forked
+                # from the one that made it, the folder of the simulation this
+                # one was cloned from, say. Nothing here would remove it if
+                # it were made again, so this simulation's goes in the default
+                # temporary folder, as in a forked process above.
+                parent = None
             self._storage_directory = TemporaryStorageDirectory(parent)
             self._data_storage_dir = self._storage_directory.path
         elif not self._made_data_storage_dir():
-            # A folder the caller chose, made if it does not exist yet.
-            os.makedirs(self._data_storage_dir, exist_ok=True)
+            _chosen_folder_exists(self._data_storage_dir, self._storage_dir_keeper)
         self._storage_dir_pid = pid
         return self._data_storage_dir
 
@@ -1741,6 +1781,7 @@ class Simulation:
             or self._storage_dir_pid not in (None, os.getpid())
         ):
             new._storage_dir_parent = self._data_storage_dir
+            new._storage_dir_parent_chosen = not self._made_data_storage_dir()
         new._data_storage_dir = None
         new._storage_directory = None
         if new._storage_dir_parent is not None:

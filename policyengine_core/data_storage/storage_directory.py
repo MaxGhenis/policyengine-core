@@ -18,10 +18,11 @@ files guarantees:
   keeps alive the folder and the storage that removes their subfolder. A
   pickled or copied disk storage does the same. The disk storages a clone
   makes itself go in a folder of its own. And no two disk storages that
-  holders make share a subfolder: each takes one no other storage uses
-  (``Holder.create_disk_storage``), so a holder made again for a variable,
-  while the earlier holder's storage or a clone of it still reads its
-  files, writes and removes only files of its own.
+  holders make for a simulation's folder share a subfolder: each takes one
+  no other storage uses (``Holder.create_disk_storage`` with no
+  ``directory``), so a holder made again for a variable, while the earlier
+  holder's storage or a clone of it still reads its files, writes and
+  removes only files of its own.
 
   Folders nest: a simulation given the folder, or a folder in it, as its
   own (``_data_storage_dir``) keeps the folder alive from then on, and so
@@ -37,17 +38,21 @@ files guarantees:
   the subfolder. Nor does a storage write over a file another reads:
   storages cloned or copied from one another write a new file instead (see
   ``OnDiskStorage._path_to_write``), for the files any of them read back
-  before (``OnDiskStorage.restore``) too. Those new files go once nothing
-  reads them: a storage and its clones remove the ones they made that none
-  of them reads any more before they make another, except those a copy was
+  before (``OnDiskStorage.restore``) too. A clone writes every value it
+  stores to such a new file. Those new files go once nothing reads them:
+  before a storage or a clone of it makes another, they remove the ones they
+  made that none of them alive reads any more, except those any copy was
   made with or a process forked since may read, which go with the folder
-  (see ``OnDiskStorage._remove_unread_replacements``). So making and
-  dropping clones again and again leaves a steady number of files. Storages
-  the caller made each for one subfolder still write the same file for a
-  key, as before, and ``restore`` reads whatever files are in the subfolder
-  when it runs. A ``restore`` run after a storage was cloned, with no fork
-  since, is not covered either: another storage in its family may still
-  write over a file it read back.
+  (see ``OnDiskStorage._remove_unread_replacements``). A dropped branch or
+  clone holds reference cycles, so its files go once Python's cyclic garbage
+  collector has collected it. So making, using and dropping clones again and
+  again, with no copy made or fork in between, leaves a steady number of
+  files once each dropped one is collected. Storages the caller made each
+  for one subfolder still write the same file for a key, as before, and
+  ``restore`` reads whatever files are in the subfolder when it runs. A
+  ``restore`` run after a storage was cloned, with no fork since, is not
+  covered either: another storage in its family may still write over a file
+  it read back.
 * **Explicitly preserved storages.** A disk storage made with
   ``preserve_storage_dir=True`` (``Holder.create_disk_storage(preserve=True)``,
   say), or whose ``preserve_storage_dir`` is later set to ``True``, keeps its
@@ -65,26 +70,30 @@ files guarantees:
   has copies of all these objects; so does a process a disk storage is
   unpickled in. Each process removes only the folders and disk storage
   subfolders it made, but removing a folder removes everything in it, the
-  folder a forked process made inside it included. Disk storages copied
-  into another process, by forking or unpickling, or cloned from one there,
-  write only new files of their own, and after forking, the disk storages
-  of the process that made the folder write over no file they wrote or read
-  back before. So neither process writes over a file the other reads
-  through these storages. A forked process stores what new holders put on
-  disk in a folder of its own, made inside the folder it inherited. But
-  nothing in another process keeps the folder alive: once the process that
-  made it collects the simulation and its storages, or exits, the folder is
-  gone, with everything in it, the forked process's own folder included,
-  even while a forked or unpickling process still reads them. Explicit
-  preservation is likewise kept only by the process that made the folder.
-* **A folder the caller chose** (``_data_storage_dir``). It is made if it
-  does not exist yet, when the simulation, or a clone of it, first needs it.
-  Nothing removes it, only the subfolders disk storages made in it, as
-  before, unless it is in a folder a simulation made: that one removes it
-  with everything else in it, once nothing keeps that one alive (above). A
-  clone or forked process makes its own folder inside it. Several
-  simulations may be given it: each holder's disk storage takes a subfolder
-  of its own there (above).
+  folder a forked process made inside it included. Disk storages copied into
+  another process, by forking or unpickling, or cloned from one there, write
+  only new files of their own, and after forking, the disk storages of the
+  process that made the folder write over no file they wrote or read back
+  before. So neither process writes over a file the other reads through
+  these storages. A forked process stores what new holders put on disk in a
+  folder of its own, made inside the folder it inherited, or, if a
+  simulation made that one and it is gone, in the default temporary folder.
+  But nothing in another process keeps the folder alive: once the process
+  that made it collects the simulation and its storages, or exits, the
+  folder is gone, with everything in it, the forked process's own folder
+  included, even while a forked or unpickling process still reads them.
+  Explicit preservation is likewise kept only by the process that made the
+  folder.
+* **A folder the caller chose** (``_data_storage_dir``). It is made whenever
+  the simulation, a clone of it or a process forked from it needs it and it
+  does not exist, but not the folders leading to it, nor once a folder a
+  simulation made containing it is gone. Nothing removes it, only the
+  subfolders disk storages made in it, as before, unless it is in a folder a
+  simulation made: that one removes it with everything else in it, once
+  nothing keeps that one alive (above). A clone or forked process makes its
+  own folder inside it. Several simulations may be given it: each holder's
+  disk storage takes a subfolder of its own there (above), and leaves alone
+  any subfolder already there (one a killed process left, say).
 * **A process that ends without running the exit handlers that remove its
   folders** (killed, or ended with ``os._exit``, as a process
   ``multiprocessing`` forks is) leaves the folders it made that were still
