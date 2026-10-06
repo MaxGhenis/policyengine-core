@@ -2028,15 +2028,6 @@ class Simulation:
         if not self._is_exportable_input_variable(variable_name):
             return []
 
-        return self._get_set_input_periods(variable_name)
-
-    def _get_set_input_periods(self, variable_name: str) -> List[Period]:
-        """Periods of ``variable_name`` whose stored value the simulation was given.
-
-        That is every value loaded from the dataset or passed to ``set_input``
-        on a branch this simulation reads, including for a variable that has
-        a formula. Values the simulation calculated are left out.
-        """
         user_input_periods = {
             period
             for input_variable_name, branch_name, period in getattr(
@@ -2094,6 +2085,19 @@ class Simulation:
 
         return df
 
+    def _get_input_periods(self, variable_name: str) -> List[Period]:
+        """Periods for which the value of ``variable_name`` this simulation
+        reads is an input: loaded from the dataset, set with ``set_input`` or
+        restored as one, for a variable with a formula too, rather than
+        calculated (see ``Holder.get_input_periods``, which carry-over and
+        uprating also read). A variable with no stored value gets no holder.
+        """
+        population = self.get_variable_population(variable_name)
+        holder = population._holders.get(variable_name)
+        if holder is None:
+            return []
+        return holder.get_input_periods(self.branch_name)
+
     def to_input_dict(self, include_computed_variables: bool = False) -> dict:
         """Exports a dictionary that can be loaded back into a new Simulation.
 
@@ -2134,11 +2138,23 @@ class Simulation:
     ) -> "Simulation":
         """Quantize the simulation to a smaller size by sampling households.
 
+        The simulation is rebuilt from the inputs of the sampled households:
+        the values it was given (from its dataset, with ``set_input``, or
+        restored as inputs), not the ones it calculated, which it calculates
+        again from those inputs. Branches made before are dropped, since
+        they hold the whole population: ``get_branch`` makes new ones from
+        the subsample, and a baseline branch is made again with its policy.
+
         Args:
             n (int, optional): The number of households to sample. Defaults to 10_000.
             frac (float, optional): The fraction of households to sample. Defaults to None.
             seed (int, optional): The key used to seed the random number generator. Defaults to the dataset name.
-            time_period (str, optional): Sample households based on their weight in this time period. Defaults to the default calculation period.
+            time_period (str, optional): Sample households by the household
+                weights the simulation was given for this period. If none
+                were given for it: by those given for the period of the
+                household IDs, else for the latest period before it (the
+                ones carried over to it), else for the earliest period.
+                Defaults to the default calculation period.
 
         Returns:
             Simulation: The quantized simulation.
@@ -2153,31 +2169,25 @@ class Simulation:
             time_period = self.default_calculation_period
 
         # Subsampling rebuilds the simulation from what it was given: every
-        # value loaded from the dataset or set with ``set_input``, including
-        # for variables that have a formula (structural IDs, for instance).
-        # Calculated values are left out. Reloaded as inputs they would
-        # replace their formulas for good, so later results (after a reform,
-        # or carried over to another year) would depend on what happened to
-        # be calculated before subsampling.
-        df = self._to_person_dataframe(self._get_set_input_periods)
+        # value loaded from the dataset, set with ``set_input`` or restored as
+        # an input, including for variables that have a formula (structural
+        # IDs, for instance). Calculated values are left out. Reloaded as
+        # inputs they would replace their formulas for good, so later results
+        # (after a reform, or carried over to another year) would depend on
+        # what happened to be calculated before subsampling.
+        df = self._to_person_dataframe(self._get_input_periods)
 
-        # Extract time period from DataFrame columns
-        df_time_period = (
-            df.columns[df.columns.str.contains("household_id__")]
-            .values[0]
-            .split("__")[1]
-        )
-        df_household_id_column = f"household_id__{df_time_period}"
-        df_person_id_column = f"person_id__{df_time_period}"
+        household_weight_column = self._subsample_weight_column(df, time_period)
 
-        # Determine the appropriate household weight column
-        if f"household_weight__{time_period}" in df.columns:
-            household_weight_column = f"household_weight__{time_period}"
-        else:
-            household_weight_column = f"household_weight__{df_time_period}"
+        # Each person's household, from the simulation's own structure, so
+        # the household IDs need not be among the inputs. Grouping sorts the
+        # households by these IDs, which put them in the order the dataset's
+        # household IDs do.
+        households = self.get_variable_population("household_weight")
+        person_household_ids = households.ids[households.members_entity_id]
 
         # Group by household ID and get the first entry for each group
-        h_df = df.groupby(df_household_id_column).first()
+        h_df = df.groupby(person_household_ids).first()
         h_ids = pd.Series(h_df.index)
         if n is None and frac is None:
             raise ValueError("Either n or frac must be provided.")
@@ -2215,9 +2225,10 @@ class Simulation:
                 household_id_to_count[household_id] = 0
             household_id_to_count[household_id] += 1
 
-        subset_df = df[df[df_household_id_column].isin(chosen_household_ids)].copy()
+        kept = np.isin(person_household_ids, chosen_household_ids)
+        subset_df = df[kept].copy()
 
-        household_counts = subset_df[df_household_id_column].map(
+        household_counts = pd.Series(person_household_ids[kept]).map(
             lambda x: household_id_to_count.get(x, 0)
         )
 
@@ -2231,6 +2242,12 @@ class Simulation:
                 else:
                     subset_df[col] = household_counts.values
                 subset_df[col] *= target_total_weight / subset_df[col].values.sum()
+
+        # Every branch is a copy of the simulation as it was, with the whole
+        # population, which a formula that branches would find again with
+        # ``get_branch``. Drop them all; the baseline is made again below.
+        dropped_baseline = self.branches.get("baseline")
+        self.branches = {}
 
         df = subset_df
 
@@ -2256,16 +2273,55 @@ class Simulation:
         # ``self.branches["tax_benefit_system"]`` — a stray dict key — so the
         # rebuilt baseline branch kept the reform system and reform-vs-baseline
         # comparisons after ``subsample`` compared the reform against itself.
-        if "baseline" in self.branches:
-            baseline_tax_benefit_system = self.branches["baseline"].tax_benefit_system
-            del self.branches["baseline"]
+        if dropped_baseline is not None:
             baseline = self.get_branch("baseline")
-            baseline.tax_benefit_system = baseline_tax_benefit_system
+            baseline.tax_benefit_system = dropped_baseline.tax_benefit_system
             if getattr(self, "baseline", None) is not None:
                 self.baseline = baseline
 
         self.default_calculation_period = default_calculation_period
         return self
+
+    @staticmethod
+    def _subsample_weight_column(df: pd.DataFrame, time_period) -> str:
+        """The column of input household weights ``subsample`` samples by.
+
+        ``df`` holds the inputs only. Calculated weights are calculated
+        again after subsampling, from the input weights quantized, so
+        sampling by one would count its formula (or uprating) twice, and
+        which ones happened to be calculated would change the sample. See
+        ``subsample``'s ``time_period`` for the order the input weights are
+        looked for in.
+        """
+        prefix = "household_weight__"
+        given = [column for column in df.columns if column.startswith(prefix)]
+        if not given:
+            raise ValueError(
+                "subsample samples households by the household weights the "
+                "simulation was given (in its dataset or with set_input), but "
+                "household_weight was given for no period."
+            )
+        if f"{prefix}{time_period}" in given:
+            return f"{prefix}{time_period}"
+        # The period of the household IDs, which is the dataset's.
+        id_columns = [
+            column for column in df.columns if column.startswith("household_id__")
+        ]
+        if id_columns:
+            column = prefix + id_columns[0].split("__", 1)[1]
+            if column in given:
+                return column
+
+        def start(column):
+            return periods.period(column.split("__", 1)[1]).start
+
+        given = sorted(given, key=start)
+        if time_period is not None:
+            target = periods.period(time_period).start
+            earlier = [column for column in given if start(column) <= target]
+            if earlier:
+                return earlier[-1]
+        return given[0]
 
 
 class NpEncoder(json.JSONEncoder):
