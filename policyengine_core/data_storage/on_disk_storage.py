@@ -148,10 +148,12 @@ class OnDiskStorage:
             directory.keep(key)
 
     def _writes_only_new_files(self) -> bool:
-        """Whether storages this one cannot know of write in its directory:
-        it is copied (``__setstate__``), cloned from a copy, or in a process
-        forked from the one that made it. So ``put`` writes only new files of
-        its own (see ``_path_to_write``)."""
+        """Whether ``put`` writes only new files of its own (see
+        ``_path_to_write``): this storage is a clone, so that the files it
+        writes go once it is collected (see ``_remove_unread_replacements``);
+        or storages it cannot know of write in its directory, since it is
+        copied (``__setstate__``) or in a process forked from the one that
+        made it."""
         return self._detached or self._creator_pid != os.getpid()
 
     def _catch_up_after_fork(self) -> None:
@@ -227,7 +229,9 @@ class OnDiskStorage:
         through the clone does not mutate the source storage. The underlying
         ``.npy`` files are shared, so neither storage writes over them: a later
         ``put`` of one of their keys, through either storage, writes a new
-        file (see ``_path_to_write``). Clones retain the original cleanup owner
+        file, and the clone writes every value it stores to a new file of its
+        own, which go once it is collected and nothing else reads them (see
+        ``_path_to_write``). Clones retain the original cleanup owner
         so the shared directory stays alive, but never own cleanup themselves,
         nor preserve the directory (see ``preserve_storage_dir``).
         """
@@ -235,7 +239,10 @@ class OnDiskStorage:
         clone = OnDiskStorage.__new__(OnDiskStorage)
         clone._start(self.storage_dir, self.is_eternal, self._parent_directory)
         clone._preserve_storage_dir = True
-        clone._detached = self._writes_only_new_files()
+        # It writes every value it has not written itself to a new file of its
+        # own, for a key no storage of the family stored too, so that the
+        # family removes what it wrote once it is collected.
+        clone._detached = True
         clone._files = self._files.copy()
         clone._enums = self._enums.copy()
         clone._derived = set(self._derived)
@@ -324,8 +331,11 @@ class OnDiskStorage:
         would change that storage's value. So ``put`` writes over one of
         their files only if this storage wrote it and has not shared it since;
         otherwise the value goes to a new file of its own, in
-        ``REPLACEMENTS_DIR``. A file only storages outside this family wrote
-        is written over, as before.
+        ``REPLACEMENTS_DIR``. A clone writes every value it has not written
+        itself to such a file, for a key no storage of the family stored too,
+        so that the files it wrote can go once it is collected. Any other
+        storage writes such a key to the file named for it, and writes over a
+        file only storages outside this family wrote, as before.
 
         A copied storage, or one in a process forked from the one that made
         it, shares the directory with storages it cannot know of: it writes
@@ -335,8 +345,7 @@ class OnDiskStorage:
         writes over none of them.
 
         Before making a new file, the family removes those it made that none
-        of its storages reads any more (``_remove_unread_replacements``), so
-        cloning and writing again and again leaves a steady number of files.
+        of its storages reads any more (``_remove_unread_replacements``).
         """
         self._catch_up_after_fork()
         own = self._own_paths.get(filename)
@@ -352,36 +361,44 @@ class OnDiskStorage:
             prefix=f"{filename}.", suffix=".npy", dir=directory
         )
         os.close(descriptor)
+        # This storage's own before it is the family's to remove.
+        self._own_paths[filename] = path
         self._family_replacements[path] = _epoch()
         return path
 
     def _remove_unread_replacements(self) -> None:
         """Remove the files in ``REPLACEMENTS_DIR`` this storage's family made
         that none of its storages alive in this process reads or may write
-        again (in ``_files`` or ``_own_paths``): those a collected clone
-        wrote, say, or those a storage replaced or deleted after a clone
-        that read them was collected.
+        again (in ``_files`` or ``_own_paths``): those a clone wrote, once it
+        is garbage-collected, say, or those a storage replaced or deleted
+        after a clone that read them was collected. (Simulations hold
+        reference cycles, so a branch or clone dropped from use is collected
+        by Python's cyclic garbage collector, not as soon as it is dropped.)
 
         No other storage reads them: ``restore`` reads only the files named
         for their keys. Two kinds of file are never removed, and stay until
-        their directory is: those a copy of a storage was made with (see
-        ``__getstate__``), and those made before this process last forked,
-        which the forked process may read.
+        their directory is: those any copy of a storage was made with (see
+        ``__getstate__``), even a copy since discarded, and those made before
+        this process last forked, which the forked process may read.
         """
         replacements = self._family_replacements
         if not replacements:
             return
         epoch = _epoch()
+        candidates = list(replacements.items())
+        storages = list(self._family_storages)
         read = set()
-        for storage in list(self._family_storages):
+        for storage in storages:
             read.update(storage._files.values())
             read.update(storage._own_paths.values())
-        for path, made_in in list(replacements.items()):
+        for path, made_in in candidates:
             if made_in != epoch:
-                del replacements[path]
+                replacements.pop(path, None)
             elif path not in read:
-                del replacements[path]
+                replacements.pop(path, None)
                 self._family_files.discard(path)
+                for storage in storages:
+                    storage._enums.pop(path, None)
                 try:
                     os.remove(path)
                 except OSError:
