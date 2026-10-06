@@ -17,7 +17,11 @@ files guarantees:
   storage is an ``OnDiskStorage.clone`` that reads the source's files and
   keeps alive the folder and the storage that removes their subfolder. A
   pickled or copied disk storage does the same. The disk storages a clone
-  makes itself go in a folder of its own.
+  makes itself go in a folder of its own. And no two disk storages that
+  holders make share a subfolder: each takes one no other storage uses
+  (``Holder.create_disk_storage``), so a holder made again for a variable,
+  while the earlier holder's storage or a clone of it still reads its
+  files, writes and removes only files of its own.
 
   Folders nest: a simulation given the folder, or a folder in it, as its
   own (``_data_storage_dir``) keeps the folder alive from then on, and so
@@ -33,9 +37,9 @@ files guarantees:
   inside the subfolder. Nor does a storage write over a file another reads:
   storages cloned or copied from one another write a new file instead (see
   ``OnDiskStorage._path_to_write``), for the files any of them read back
-  before (``OnDiskStorage.restore``) too. Storages each made for one
-  subfolder still write the same file for a key, as before, and ``restore``
-  reads whatever files are in the subfolder when it runs. A ``restore`` run
+  before (``OnDiskStorage.restore``) too. Storages the caller made each
+  for one subfolder still write the same file for a key, as before, and
+  ``restore`` reads whatever files are in the subfolder when it runs. A ``restore`` run
   after a storage was cloned, with no fork since, is not covered either:
   another storage in its family may still write over a file it read back.
 * **Explicitly preserved storages.** A disk storage made with
@@ -71,7 +75,8 @@ files guarantees:
   only the subfolders disk storages made in it, as before, unless it is in a
   folder a simulation made: that one removes it with everything else in it,
   once nothing keeps that one alive (above). A clone or forked process makes
-  its own folder inside it.
+  its own folder inside it. Several simulations may be given it: each
+  holder's disk storage takes a subfolder of its own there (above).
 * **A process that ends without running the exit handlers that remove its
   folders** (killed, or ended with ``os._exit``, as a process
   ``multiprocessing`` forks is) leaves the folders it made that were still

@@ -1,4 +1,5 @@
 import os
+import tempfile
 import warnings
 from typing import TYPE_CHECKING, Any, List, Tuple
 
@@ -15,6 +16,17 @@ from policyengine_core.periods import Period
 if TYPE_CHECKING:
     from policyengine_core.populations import Population
     from policyengine_core.variables import Variable
+
+
+def _new_storage_dir(directory: str, name: str) -> str:
+    """Make a subfolder of ``directory`` that no other disk storage uses, for
+    the values of variable ``name``, and return its path."""
+    storage_dir = os.path.join(directory, name)
+    try:
+        os.mkdir(storage_dir)
+    except FileExistsError:
+        storage_dir = tempfile.mkdtemp(prefix=f"{name}_", dir=directory)
+    return storage_dir
 
 
 class Holder:
@@ -82,11 +94,26 @@ class Holder:
     def create_disk_storage(
         self, directory: str = None, preserve: bool = False
     ) -> OnDiskStorage:
+        """Make a disk storage for this variable's values.
+
+        In ``directory``, the storage's folder is the subfolder named for the
+        variable, made if it does not exist (``simulation_dumper`` lays out a
+        dump this way). Without ``directory``, it is a new subfolder of the
+        simulation's ``data_storage_dir`` that no other disk storage uses: the
+        one named for the variable if there is none yet, otherwise a new one
+        named after it (``<variable>_*``). So a holder made again for the
+        variable, while the earlier holder's disk storage (or a clone of it)
+        still reads its files, or another simulation given the same folder,
+        neither writes over those files nor removes them with its own folder.
+        """
         if directory is None:
-            directory = self.simulation.data_storage_dir
-        storage_dir = os.path.join(directory, self.variable.name)
-        if not os.path.isdir(storage_dir):
-            os.mkdir(storage_dir)
+            storage_dir = _new_storage_dir(
+                self.simulation.data_storage_dir, self.variable.name
+            )
+        else:
+            storage_dir = os.path.join(directory, self.variable.name)
+            if not os.path.isdir(storage_dir):
+                os.mkdir(storage_dir)
         # In the temporary folder the simulation made, the storage (and every
         # clone or copy of it) keeps the folder until it is collected, so the
         # folder outlives the simulation while a clone still reads it (see
