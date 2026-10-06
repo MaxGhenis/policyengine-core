@@ -11,12 +11,18 @@ from policyengine_core import periods
 from policyengine_core.periods import ETERNITY
 from policyengine_core.simulations import Simulation
 
+<<<<<<< HEAD
 # Next to each variable's arrays: the periods, one per line, whose dumped
 # value was an input (stored through ``set_input``). ``restore_simulation``
 # registers exactly these as inputs, so ``apply_reform``, which keeps inputs
 # and drops calculated values, keeps the same values in the restored
 # simulation as in the dumped one.
 INPUT_PERIODS_FILE = "inputs.txt"
+=======
+# Periods, one per line, whose dumped value the simulation calculated (see
+# ``Holder.is_derived``), so a restored simulation does not carry them over.
+DERIVED_PERIODS_FILE = "derived_periods.txt"
+>>>>>>> upstream/master
 
 
 def dump_simulation(simulation, directory):
@@ -98,6 +104,7 @@ def restore_simulation(directory, tax_benefit_system, **kwargs):
 
 def _dump_holder(holder, directory, input_keys=frozenset()):
     disk_storage = holder.create_disk_storage(directory, preserve=True)
+<<<<<<< HEAD
     input_periods = []
     for period in holder.get_known_periods():
         value = holder.get_array(period)
@@ -128,6 +135,20 @@ def _input_storage_keys(simulation):
             continue
         input_keys.add((name, branch_name, str(periods.period(period))))
     return input_keys
+=======
+    derived_periods = set()
+    for period in holder.get_known_periods():
+        value = holder.get_array(period)
+        disk_storage.put(value, period)
+        # Read the mark of exactly the value dumped: the same period on the
+        # same branch as ``get_array``.
+        if holder.is_derived(period):
+            derived_periods.add(str(period))
+    if derived_periods:
+        path = os.path.join(disk_storage.storage_dir, DERIVED_PERIODS_FILE)
+        with open(path, "w") as file:
+            file.write("\n".join(sorted(derived_periods)) + "\n")
+>>>>>>> upstream/master
 
 
 def _dump_entity(population, directory):
@@ -195,6 +216,7 @@ def _restore_holder(simulation, variable, directory):
 
     holder = simulation.get_holder(variable)
 
+<<<<<<< HEAD
     input_periods_path = os.path.join(storage_dir, INPUT_PERIODS_FILE)
     if os.path.exists(input_periods_path):
         with open(input_periods_path) as file:
@@ -226,3 +248,14 @@ def _restore_input(simulation, holder, period, value):
         holder._set(period, value, simulation.branch_name)
     finally:
         simulation._user_input_contexts.pop()
+=======
+    derived_periods_path = os.path.join(storage_dir, DERIVED_PERIODS_FILE)
+    derived_periods = set()
+    if os.path.exists(derived_periods_path):
+        with open(derived_periods_path) as file:
+            derived_periods = set(file.read().split())
+
+    for period in disk_storage.get_known_periods():
+        value = disk_storage.get(period)
+        holder.put_in_cache(value, period, derived=str(period) in derived_periods)
+>>>>>>> upstream/master
