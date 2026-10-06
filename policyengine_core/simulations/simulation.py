@@ -22,11 +22,7 @@ from policyengine_core.holders.holder import Holder
 from policyengine_core.periods import Period
 from policyengine_core.periods.config import ETERNITY, MONTH, YEAR
 from policyengine_core.periods.helpers import period
-from policyengine_core.tracers import (
-    FullTracer,
-    SimpleTracer,
-    TracingParameterNodeAtInstant,
-)
+from policyengine_core.tracers import FullTracer, SimpleTracer
 import random
 from policyengine_core.tools.hugging_face import *
 from policyengine_core.tools.google_cloud import (
@@ -215,8 +211,7 @@ class Simulation:
         # branch starts with a copy (see ``set_input``).
         self._store_history = StoreHistory()
         self.debug: bool = False
-        self.trace: bool = trace
-        self.tracer: SimpleTracer = SimpleTracer() if not trace else FullTracer()
+        self.trace: bool = trace  # also builds self.tracer
         self.opt_out_cache: bool = False
         # controls the spirals detection; check for performance impact if > 1
         self.max_spiral_loops: int = 10
@@ -537,6 +532,16 @@ class Simulation:
             self.tracer = FullTracer()
         else:
             self.tracer = SimpleTracer()
+        # Parameter reads are recorded through the parameter tree, which
+        # wraps its cached plain at-instant nodes for tracing on access.
+        # Point it at the tracer here rather than lazily in _run_formula:
+        # by the time a formula runs, defined_for and adds/subtracts
+        # evaluation has already read the yearly node.
+        parameters = getattr(
+            getattr(self, "tax_benefit_system", None), "parameters", None
+        )
+        if parameters is not None:
+            parameters.set_tracing(self.tracer if trace else None, self.branch_name)
 
     def link_to_entities_instances(self) -> None:
         for _key, entity_instance in self.populations.items():
@@ -912,6 +917,14 @@ class Simulation:
                     value_in_this_period = _uprating_index_value(
                         uprating_parameter, period.start
                     )
+                    self._record_parameter_read(
+                        uprating_parameter.name,
+                        latest_known_period.start,
+                        value_in_last_period,
+                    )
+                    self._record_parameter_read(
+                        uprating_parameter.name, period.start, value_in_this_period
+                    )
                     if (
                         value_in_last_period is None
                         or value_in_this_period is None
@@ -1129,6 +1142,19 @@ class Simulation:
 
         return variable.calculate_output(self, variable_name, period)
 
+    def _record_parameter_read(self, name: str, instant, value) -> None:
+        """Record a parameter the core read on a variable's behalf.
+
+        Parameter-backed ``adds``/``subtracts`` lists and uprating factors
+        are resolved on the tree directly rather than through the formula's
+        ``parameters(period)`` wrapper, so they would otherwise be missing
+        from the variable's trace node.
+        """
+        if self.trace:
+            self.tracer.record_parameter_access(
+                name, str(instant), self.branch_name, value
+            )
+
     def _run_formula(
         self, variable: str, population: Population, period: Period
     ) -> ArrayLike:
@@ -1151,6 +1177,9 @@ class Simulation:
                             f"In the variable '{variable.name}', the 'adds' attribute is a string '{variable.adds}' that does not match any parameter."
                         )
                     adds_list = adds_parameter(period.start)
+                    self._record_parameter_read(
+                        adds_parameter.name, period.start, list(adds_list)
+                    )
                 else:
                     adds_list = variable.adds
                 values = 0
@@ -1165,7 +1194,11 @@ class Simulation:
                                 self.tax_benefit_system.parameters,
                                 added_variable,
                             )
-                            values = values + parameter(period.start)
+                            added_value = parameter(period.start)
+                            self._record_parameter_read(
+                                parameter.name, period.start, added_value
+                            )
+                            values = values + added_value
                         except:
                             raise ValueError(
                                 f"In the variable '{variable.name}', the 'adds' attribute is a list that contains a string '{added_variable}' that does not match any variable or parameter."
@@ -1182,6 +1215,9 @@ class Simulation:
                             f"In the variable '{variable.name}', the 'subtracts' attribute is a string '{variable.subtracts}' that does not match any parameter."
                         )
                     subtracts_list = subtracts_parameter(period.start)
+                    self._record_parameter_read(
+                        subtracts_parameter.name, period.start, list(subtracts_list)
+                    )
                 else:
                     subtracts_list = variable.subtracts
                 if values is None:
@@ -1199,29 +1235,38 @@ class Simulation:
                                 self.tax_benefit_system.parameters,
                                 subtracted_variable,
                             )
-                            values = values - parameter(period.start)
+                            subtracted_value = parameter(period.start)
+                            self._record_parameter_read(
+                                parameter.name, period.start, subtracted_value
+                            )
+                            values = values - subtracted_value
                         except:
                             raise ValueError(
                                 f"In the variable '{variable.name}', the 'subtracts' attribute is a list that contains a string '{subtracted_variable}' that does not match any variable or parameter."
                             )
             return values
 
-        if self.trace and not isinstance(
-            self.tax_benefit_system.parameters, TracingParameterNodeAtInstant
-        ):
-            # Soft-recast
-            self.tax_benefit_system.parameters.branch_name = self.branch_name
-            self.tax_benefit_system.parameters.trace = True
-            self.tax_benefit_system.parameters.tracer = self.tracer
         parameters_at = self.tax_benefit_system.parameters
+        previous_tracing = None
+        if self.trace and parameters_at is not None:
+            # Point the shared parameter tree at this simulation's tracer and
+            # branch for the duration of the formula, then hand it back: a
+            # nested branch calculation must not relabel the reads its
+            # caller makes after it returns.
+            previous_tracing = (parameters_at.tracer, parameters_at.branch_name)
+            parameters_at.set_tracing(self.tracer, self.branch_name)
 
         # A rules-engine formula must be a pure, deterministic function of its
         # inputs. Randomness is forbidden statically at variable registration
         # (check_formula_determinism), so no runtime guard is needed here.
-        if formula.__code__.co_argcount == 2:
-            array = formula(population, period)
-        else:
-            array = formula(population, period, parameters_at)
+        try:
+            if formula.__code__.co_argcount == 2:
+                array = formula(population, period)
+            else:
+                array = formula(population, period, parameters_at)
+        finally:
+            if previous_tracing is not None:
+                parameters_at.set_tracing(*previous_tracing)
 
         return array
 
@@ -1751,6 +1796,17 @@ class Simulation:
         if self.trace:
             branch.trace = True
             branch.tracer = self.tracer
+            # The trace setter pointed the branch's parameter tree at a fresh
+            # tracer under the branch's name. Point it at the shared tracer
+            # again, and when the tree itself is shared, back at the caller,
+            # whose formula is still running and may read parameters before
+            # the branch calculates anything.
+            parameters = getattr(branch.tax_benefit_system, "parameters", None)
+            if parameters is not None:
+                if clone_system:
+                    parameters.set_tracing(self.tracer, name)
+                else:
+                    parameters.set_tracing(self.tracer, self.branch_name)
         return branch
 
     def derivative(
