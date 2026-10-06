@@ -2389,10 +2389,14 @@ def test_value_read_after_the_callee_settles_is_kept(input_first):
     assert consumer.get_array("result", "2020").tolist() == [6.0]
 
 
-@pytest.mark.parametrize("input_first", [False, True])
-def test_input_set_directly_on_an_idle_simulation_after_reading_it(input_first):
+@pytest.mark.xfail(
+    strict=True,
+    reason="documented limit: an input set on a simulation while nothing "
+    "calculates there does not reach a calculation that already read from it",
+)
+def test_input_set_directly_on_an_idle_simulation_after_reading_it():
     """The worker has finished calculating when the formula replaces its input."""
-    worker = _worker(lambda person, period: person("source", period) * 2, input_first)
+    worker = _worker(lambda person, period: person("source", period) * 2, False)
 
     def result(person, period):
         earlier = worker.calculate("leaf", period)
@@ -2401,9 +2405,61 @@ def test_input_set_directly_on_an_idle_simulation_after_reading_it(input_first):
 
     consumer = _consumer_of(worker, result)
 
-    assert consumer.calculate("result", "2020").tolist() == [6.0]
-    assert consumer.get_array("result", "2020").tolist() == [6.0]
-    assert worker.calculate("leaf", "2020").tolist() == [6.0]
+    assert consumer.calculate("result", "2020").tolist() == [6.0]  # input-first
+
+
+def test_formula_that_resets_an_input_on_a_kept_branch_runs_once():
+    """As policyengine-us's NY pre-TCJA CTC: delete, read, set the input again.
+
+    The branch is not calculating when its input changes, so the formula that
+    read from it keeps its result rather than running again (each run would
+    delete and set the input again, and never settle).
+    """
+    from collections import Counter
+
+    runs = Counter()
+
+    def counted(name, formula):
+        def wrapped(person, period):
+            runs[name] += 1
+            return formula(person, period)
+
+        return _yearly_variable(name, wrapped)
+
+    def uses_branch(person, period):
+        branch = person.simulation.get_branch("pinned")  # kept between calls
+        branch.delete_arrays("cap")
+        base = branch.calculate("base", period)
+        branch.set_input("cap", period, base * 2)
+        return branch.calculate("capped", period)
+
+    system = _one_person_system(
+        _yearly_variable("x"),
+        _yearly_variable("base", lambda person, period: person("x", period) + 1),
+        _yearly_variable("cap", lambda person, period: person("base", period) * 10),
+        _yearly_variable(
+            "capped",
+            lambda person, period: np.minimum(
+                person("base", period) * 3, person("cap", period)
+            ),
+        ),
+        counted("uses_branch", uses_branch),
+        counted(
+            "outer",
+            lambda person, period: (
+                person("cap", period) * 0
+                + person("uses_branch", period)
+                + person("x", period)
+            ),
+        ),
+    )
+    simulation = SimulationBuilder().build_default_simulation(system)
+    simulation.set_input("x", "2024", np.array([1.0]))
+
+    assert simulation.calculate("outer", "2024").tolist() == [5.0]
+    assert simulation.calculate("outer", "2024").tolist() == [5.0]
+    assert runs == {"outer": 1, "uses_branch": 1}
+    assert simulation.get_array("outer", "2024").tolist() == [5.0]
 
 
 # ----- Setting the input a branch already reads ----- #

@@ -341,7 +341,7 @@ class Simulation:
     _inputs_set: int = 0  # inputs stored through ``Holder.set_input``
     _calculations_in_flight: int = 0  # ``calculate``/``calculate_add`` running
     _calculations_started: int = 0  # ``_calculate`` calls begun
-    _requested_variables: Optional[set] = None
+    _dropped_variables: Optional[set] = None  # see ``_get_dropped_variables``
     _store_history: Optional[StoreHistory] = None  # see ``_get_store_history``
     _open_frames: Optional[set] = None  # the ``_Frame``s open here, any thread
 
@@ -930,12 +930,6 @@ class Simulation:
                 # simulation given those inputs first would.
                 frame.restart()
                 result = self._calculate(variable_name, period)
-            # Satisfies ``requires_computation_after`` from now on, even if a
-            # branch input later drops the values.
-            requested = self._requested_variables
-            if requested is None:
-                requested = self._get_requested_variables()
-            requested.add(variable_name)
             if isinstance(result, EnumArray) and decode_enums:
                 result = result.decode_to_str()
             self.tracer.record_calculation_result(result)
@@ -1129,10 +1123,11 @@ class Simulation:
             required_is_known_periods = self.get_holder(
                 variable.requires_computation_after
             ).get_known_periods()
-            # A branch input may have dropped the prerequisite's values; it
-            # was still requested.
+            # A branch input (or ``drop_computed_arrays``) may have dropped
+            # the prerequisite's values; they were calculated, so it was
+            # requested.
             required_was_requested = (
-                variable.requires_computation_after in self._get_requested_variables()
+                variable.requires_computation_after in self._get_dropped_variables()
             )
             if (
                 (not variable_in_stack)
@@ -1990,11 +1985,12 @@ class Simulation:
             history = self._store_history = StoreHistory()
         return history
 
-    def _get_requested_variables(self) -> set:
-        requested = self._requested_variables
-        if requested is None:
-            requested = self._requested_variables = set()
-        return requested
+    def _get_dropped_variables(self) -> set:
+        """Variables some of whose calculated values a drop removed here."""
+        dropped = self._dropped_variables
+        if dropped is None:
+            dropped = self._dropped_variables = set()
+        return dropped
 
     def _share_store_history_with_caller(self) -> None:
         """Merge this simulation's store history into that of a formula calling it."""
@@ -2041,17 +2037,26 @@ class Simulation:
         dropped = 0
         for population in self.populations.values():
             for holder in population._holders.values():
-                dropped += holder._drop_computed(since)
+                held = holder._drop_computed(since)
+                if held:
+                    dropped += held
+                    # It was calculated here, so it was requested: see
+                    # ``requires_computation_after`` in ``_calculate``.
+                    self._get_dropped_variables().add(holder.variable.name)
         # The fast cache can also hold values a holder does not keep.
         self._fast_cache = {}
-        # A calculation that got a value from here before the drop, running
-        # here or in another simulation, may hold it or what it calculated
-        # from it: none of them keeps its result (``_Frame.is_stale``), and
-        # the outermost one in each simulation runs again (``calculate``).
-        self._input_epoch = self._input_epoch + 1
         if self._calculations_in_flight:
-            # A formula running here may still hold values calculated from
-            # what the records describe: keep the records.
+            # A formula running here may hold, in its own variables, a value
+            # it read before the drop: keep the records, and keep none of the
+            # results calculations running here return, nor any calculated
+            # from them in other simulations (``_Frame.is_stale``); the
+            # outermost one here runs again (``calculate``). A drop with
+            # nothing running here counts for none of that: a formula
+            # elsewhere that read from this simulation and then set its input
+            # keeps what it read (see "Values already read stay read" in
+            # docs/usage/branches.md). Counting it would rerun such a formula
+            # without end when each run sets the input again.
+            self._input_epoch = self._input_epoch + 1
             return dropped
         # Nothing the simulation still holds was calculated from what the
         # records numbered ``since`` or later describe, except the inputs it
@@ -2174,7 +2179,7 @@ class Simulation:
         # The copy holds what this simulation holds, so it starts from what
         # those values may have been calculated from, and diverges from there.
         new._store_history = self._get_store_history().copy()
-        new._requested_variables = set(self._get_requested_variables())
+        new._dropped_variables = set(self._get_dropped_variables())
         # Calculations running in this simulation are not running in the copy.
         new._calculations_in_flight = 0
         new._open_frames = set()
