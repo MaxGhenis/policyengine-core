@@ -73,6 +73,11 @@ class _Family:
 
     def apply(self, operation: tuple):
         kind, index, *arguments = operation
+        if kind == "drop":
+            # Before taking any reference this frame would hold through the
+            # collection.
+            self.drop(index)
+            return None
         member = self.pick(index)
         simulation = member.simulation
         if kind == "branch":
@@ -101,10 +106,13 @@ class _Family:
             simulation.delete_arrays(variable)
         elif kind == "new_holders":
             make_holders_again(simulation)
-        elif kind == "drop" and member.parent is not None:
-            self.drop(member)
 
-    def drop(self, member: _Member) -> None:
+    def drop(self, index: int) -> None:
+        """Drop a branch or clone, and every branch or clone made from it,
+        and collect them."""
+        member = self.pick(index)
+        if member.parent is None:
+            return
         dropped = [member]
         for other in self.members:
             ancestor = other.parent
@@ -117,7 +125,8 @@ class _Family:
             branches = member.parent.simulation.branches
             if branches.get(member.branch_name) is member.simulation:
                 del branches[member.branch_name]
-        del dropped, member
+        # Nothing in this frame may keep a dropped member alive.
+        del dropped, member, other, ancestor
         gc.collect()
 
     def disk_storages(self) -> list:
