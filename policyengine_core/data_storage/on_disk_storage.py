@@ -103,6 +103,15 @@ class OnDiskStorage:
         # this storage reads, when it is cloned or copied; all of them, once
         # this process forks (see ``_catch_up_after_fork``).
         self._restored_paths = set()
+        # Every storage of the family alive in this process: this one, the
+        # storage it was cloned from and every other clone of either. One
+        # set, shared like ``_family_files``.
+        self._family_storages = weakref.WeakSet((self,))
+        # The files in ``REPLACEMENTS_DIR`` the family wrote, each with the
+        # epoch (``_epoch``) it was made in, and that nothing outside the
+        # family may read: removed once no storage of the family reads them
+        # (see ``_remove_unread_replacements``). One dict, shared likewise.
+        self._family_replacements = {}
         self.is_eternal = is_eternal
         self.storage_dir = storage_dir
         self._creator_pid = os.getpid()
@@ -167,7 +176,15 @@ class OnDiskStorage:
         self._catch_up_after_fork()
         self._family_files.update(self._files.values())
         self._own_paths = {}
-        return self.__dict__.copy()
+        # Nor can the family tell when that stops reading them, so it never
+        # removes them (see ``_remove_unread_replacements``).
+        for path in self._files.values():
+            self._family_replacements.pop(path, None)
+        state = self.__dict__.copy()
+        # A copy starts a family of its own (see ``__setstate__``).
+        state.pop("_family_storages", None)
+        state.pop("_family_replacements", None)
+        return state
 
     def __setstate__(self, state: dict) -> None:
         # Containers of its own: ``copy.copy`` passes the source's.
@@ -200,6 +217,8 @@ class OnDiskStorage:
         if state.get("_parent_directory") is None:
             state["_parent_directory"] = directory_containing(state["storage_dir"])
         self.__dict__.update(state)
+        self._family_storages = weakref.WeakSet((self,))
+        self._family_replacements = {}
 
     def clone(self) -> "OnDiskStorage":
         """Create a private metadata view over this storage directory.
@@ -228,6 +247,9 @@ class OnDiskStorage:
         # family did not write (read back by ``restore``, say).
         self._family_files.update(self._files.values())
         clone._family_files = self._family_files
+        clone._family_storages = self._family_storages
+        self._family_storages.add(clone)
+        clone._family_replacements = self._family_replacements
         self._own_paths = {}
         return clone
 
@@ -311,6 +333,10 @@ class OnDiskStorage:
         And after this process forks, the forked process may read any file
         this storage wrote or read back (``restore``) before, so this storage
         writes over none of them.
+
+        Before making a new file, the family removes those it made that none
+        of its storages reads any more (``_remove_unread_replacements``), so
+        cloning and writing again and again leaves a steady number of files.
         """
         self._catch_up_after_fork()
         own = self._own_paths.get(filename)
@@ -319,13 +345,47 @@ class OnDiskStorage:
         path = os.path.join(self.storage_dir, filename) + ".npy"
         if path not in self._family_files and not self._writes_only_new_files():
             return path
+        self._remove_unread_replacements()
         directory = os.path.join(self.storage_dir, REPLACEMENTS_DIR)
         os.makedirs(directory, exist_ok=True)
         descriptor, path = tempfile.mkstemp(
             prefix=f"{filename}.", suffix=".npy", dir=directory
         )
         os.close(descriptor)
+        self._family_replacements[path] = _epoch()
         return path
+
+    def _remove_unread_replacements(self) -> None:
+        """Remove the files in ``REPLACEMENTS_DIR`` this storage's family made
+        that none of its storages alive in this process reads or may write
+        again (in ``_files`` or ``_own_paths``): those a collected clone
+        wrote, say, or those a storage replaced or deleted after a clone
+        that read them was collected.
+
+        No other storage reads them: ``restore`` reads only the files named
+        for their keys. Two kinds of file are never removed, and stay until
+        their directory is: those a copy of a storage was made with (see
+        ``__getstate__``), and those made before this process last forked,
+        which the forked process may read.
+        """
+        replacements = self._family_replacements
+        if not replacements:
+            return
+        epoch = _epoch()
+        read = set()
+        for storage in list(self._family_storages):
+            read.update(storage._files.values())
+            read.update(storage._own_paths.values())
+        for path, made_in in list(replacements.items()):
+            if made_in != epoch:
+                del replacements[path]
+            elif path not in read:
+                del replacements[path]
+                self._family_files.discard(path)
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     def delete(self, period: Period = None, branch_name: str = "default") -> None:
         if period is None:

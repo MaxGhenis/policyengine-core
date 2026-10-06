@@ -33,15 +33,21 @@ files guarantees:
   is collected first, with one exception, as before: a disk storage removes
   everything in its subfolder when collected, including files there that
   another storage reads without keeping it alive. Those are the files of a
-  second storage made to remove the same subfolder, and anything made
-  inside the subfolder. Nor does a storage write over a file another reads:
+  second storage made to remove the same subfolder, and anything made inside
+  the subfolder. Nor does a storage write over a file another reads:
   storages cloned or copied from one another write a new file instead (see
   ``OnDiskStorage._path_to_write``), for the files any of them read back
-  before (``OnDiskStorage.restore``) too. Storages the caller made each
-  for one subfolder still write the same file for a key, as before, and
-  ``restore`` reads whatever files are in the subfolder when it runs. A ``restore`` run
-  after a storage was cloned, with no fork since, is not covered either:
-  another storage in its family may still write over a file it read back.
+  before (``OnDiskStorage.restore``) too. Those new files go once nothing
+  reads them: a storage and its clones remove the ones they made that none
+  of them reads any more before they make another, except those a copy was
+  made with or a process forked since may read, which go with the folder
+  (see ``OnDiskStorage._remove_unread_replacements``). So making and
+  dropping clones again and again leaves a steady number of files. Storages
+  the caller made each for one subfolder still write the same file for a
+  key, as before, and ``restore`` reads whatever files are in the subfolder
+  when it runs. A ``restore`` run after a storage was cloned, with no fork
+  since, is not covered either: another storage in its family may still
+  write over a file it read back.
 * **Explicitly preserved storages.** A disk storage made with
   ``preserve_storage_dir=True`` (``Holder.create_disk_storage(preserve=True)``,
   say), or whose ``preserve_storage_dir`` is later set to ``True``, keeps its
