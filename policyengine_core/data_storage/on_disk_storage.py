@@ -29,6 +29,17 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_new_process_token)
 
 
+def _split_key(key: str) -> tuple:
+    """Split a ``f"{branch_name}_{period}"`` file key into its two parts.
+
+    Branch names often contain ``_`` (policyengine-us uses ``no_salt`` and
+    ``mtr_for_adult_1``) but a period's string form never does, so the key
+    splits on its last ``_``.
+    """
+    branch_name, period = key.rsplit("_", 1)
+    return branch_name, period
+
+
 class OnDiskStorage:
     """
     Low-level class responsible for storing and retrieving calculated vectors on disk
@@ -183,12 +194,13 @@ class OnDiskStorage:
         if period is None:
             # Only wipe files belonging to the requested branch (previously
             # this wiped every branch regardless of ``branch_name`` — same
-            # class of bug as C2 in InMemoryStorage).
-            branch_prefix = f"{branch_name}_"
+            # class of bug as C2 in InMemoryStorage). Compare the parsed
+            # branch name, not a prefix: deleting ``pre_tcja`` must not
+            # also wipe ``pre_tcja_ctc``.
             self._files = {
                 period_item: value
                 for period_item, value in self._files.items()
-                if not period_item.startswith(branch_prefix)
+                if _split_key(period_item)[0] != branch_name
             }
             self._forget_deleted_keys()
             return
@@ -206,12 +218,12 @@ class OnDiskStorage:
             self._forget_deleted_keys()
 
     def get_known_periods(self) -> list:
-        return list([periods.period(x.split("_")[1]) for x in self._files.keys()])
+        return [period for _, period in self.get_known_branch_periods()]
 
     def get_known_branch_periods(self) -> list:
         return [
             (branch_name, periods.period(period))
-            for branch_name, period in map(lambda x: x.split("_"), self._files.keys())
+            for branch_name, period in map(_split_key, self._files.keys())
         ]
 
     def restore(self) -> None:
