@@ -31,26 +31,48 @@ _MISSING = object()
 _RESOLUTION_LOCK = threading.RLock()
 
 
+_SHADOWING_NAMES = {}
+
+
+def _shadowing_names(cls) -> frozenset:
+    """Names a node of class ``cls`` answers to itself, which a child of the
+    same name shadows."""
+    names = _SHADOWING_NAMES.get(cls)
+    if names is None:
+        names = _SHADOWING_NAMES[cls] = frozenset(dir(cls)) | _OWN_NAMES
+    return names
+
+
 class _LazyChildren:
     """What a node at instant knows about its children. A shallow copy of the
     node shares it, as copies of a node that built every child up front shared
     their ``_children`` mapping."""
 
-    __slots__ = ("instant", "source", "resolved", "absent", "added", "children")
+    __slots__ = (
+        "instant",
+        "node",
+        "resolved",
+        "absent",
+        "added",
+        "children",
+        "completing",
+    )
 
-    def __init__(self, instant: str, source: dict):
+    def __init__(self, instant: str, node):
         self.instant = instant
-        # Each child's parameter node as at construction, in order; None once
-        # every child is resolved.
-        self.source = source
-        # Children resolved from ``source`` so far.
+        # The parameter node children resolve from; None once every child is
+        # resolved. Held, not copied: a copy of every node's children for every
+        # instant cost more than the lazy build saved.
+        self.node = node
+        # Children resolved from ``node`` so far.
         self.resolved = {}
-        # Children of ``source`` with no value at the instant.
+        # Children of ``node`` with no value at the instant.
         self.absent = set()
         # Children given with ``add_child``, in call order.
         self.added = {}
-        # Every child in order, once all of ``source`` is resolved.
+        # Every child in order, once all of ``node``'s children are resolved.
         self.children = None
+        self.completing = False
 
 
 class ParameterNodeAtInstant:
@@ -61,11 +83,11 @@ class ParameterNodeAtInstant:
     descendant up front made each instant a model is asked about cost a copy of
     the whole parameter tree (16 to 33 MB and several seconds per instant for
     policyengine-us), which every tax-benefit system then kept for its
-    lifetime. Which children a node has, and in what order, is fixed when it is
-    built. A child's value is taken when the child is first read, so a node
-    held across an in-place change to its parameters reads the changed value
-    for a child it has not read yet; once read (including found to have no
-    value), a child keeps what that read found.
+    lifetime. A child is taken from the parameters when it is first read, so a
+    node held across an in-place change to its parameters (a value, or a child
+    added or removed) reflects the change for children it has not read yet;
+    once read (including found to have no value), a child keeps what that read
+    found.
     """
 
     def __init__(self, name: str, node: "ParameterNode", instant_str: str):
@@ -78,29 +100,28 @@ class ParameterNodeAtInstant:
         # The "technical" attributes are hidden, so that the node children can be easily browsed with auto-completion without pollution
         self._name = name
         self._instant_str = instant_str
-        source = dict(node.children)
-        if _STATE in source:
+        children = node.children
+        if _STATE in children:
             raise ValueError(f"{_STATE!r} cannot name a parameter.")
-        state = _LazyChildren(instant_str, source)
+        state = _LazyChildren(instant_str, node)
         self.__dict__[_STATE] = state
         cls = type(self)
         if cls.add_child is not ParameterNodeAtInstant.add_child:
             # A subclass's add_child sees every child, as before.
-            for child_name, child in source.items():
+            for child_name, child in children.items():
                 child_at_instant = child._get_at_instant(instant_str)
                 if child_at_instant is not None:
                     self.add_child(child_name, child_at_instant)
             with _RESOLUTION_LOCK:
-                state.source = None
+                state.node = None
                 state.children = dict(state.added)
             return
-        for child_name in source:
-            # A child whose name the node itself answers to shadows it, as
-            # when every child was set here.
-            if child_name in _OWN_NAMES or hasattr(cls, child_name):
-                child_at_instant = _resolve(state, child_name)
-                if child_at_instant is not _MISSING:
-                    setattr(self, child_name, child_at_instant)
+        # A child whose name the node itself answers to shadows it, as when
+        # every child was set here.
+        for child_name in _shadowing_names(cls) & children.keys():
+            child_at_instant = _resolve(state, child_name)
+            if child_at_instant is not _MISSING:
+                setattr(self, child_name, child_at_instant)
 
     def add_child(self, child_name: str, child_at_instant: "ParameterNodeAtInstant"):
         if child_name == _STATE:
@@ -199,8 +220,8 @@ def _resolve(state: _LazyChildren, child_name):
         child_at_instant = state.resolved.get(child_name, _MISSING)
         if child_at_instant is not _MISSING or child_name in state.absent:
             return child_at_instant
-        source = state.source
-        child = None if source is None else source.get(child_name)
+        node = state.node
+        child = None if node is None else node.children.get(child_name)
         if child is None:
             return _MISSING
         child_at_instant = child._get_at_instant(state.instant)
@@ -215,22 +236,32 @@ def _resolve(state: _LazyChildren, child_name):
             state.absent.add(child_name)
         else:
             state.resolved[child_name] = child_at_instant
-        if state.source is not None and len(state.resolved) + len(state.absent) == len(
-            state.source
+        if (
+            not state.completing
+            and state.node is not None
+            and len(state.resolved) + len(state.absent) >= len(state.node.children)
         ):
             _complete(state)
         return _MISSING if child_at_instant is None else child_at_instant
 
 
 def _complete(state: _LazyChildren):
-    """Order every child once all of ``source`` is resolved; let go of the
-    parameter nodes. The caller holds ``_RESOLUTION_LOCK``."""
+    """Resolve whatever is left, order every child and let go of the parameter
+    node. The caller holds ``_RESOLUTION_LOCK``."""
+    state.completing = True
+    try:
+        names = list(state.node.children)
+        for name in names:
+            _resolve(state, name)
+    finally:
+        state.completing = False
     resolved, added = state.resolved, state.added
     children = {
-        name: added.get(name, resolved[name])
-        for name in state.source
-        if name in resolved
+        name: added.get(name, resolved[name]) for name in names if name in resolved
     }
+    for name, child_at_instant in resolved.items():
+        # Read children since removed from the parameter node.
+        children.setdefault(name, added.get(name, child_at_instant))
     for name, child_at_instant in added.items():
         # Added children the parameters do not have (or have no value for)
         # follow, in the order they were added.
@@ -238,7 +269,7 @@ def _complete(state: _LazyChildren):
     if not added:
         state.resolved = children
     state.children = children
-    state.source = None
+    state.node = None
     state.absent = set()
 
 
@@ -246,12 +277,7 @@ def _materialise(node_at_instant: ParameterNodeAtInstant, state: _LazyChildren):
     """Resolve every child and set ``_children``."""
     with _RESOLUTION_LOCK:
         if state.children is None:
-            for child_name in list(state.source):
-                if state.children is not None:
-                    break
-                _resolve(state, child_name)
-            if state.children is None:
-                _complete(state)
+            _complete(state)
         children = state.children
     if "_children" not in node_at_instant.__dict__:
         # Unless a child named ``_children`` took the name.

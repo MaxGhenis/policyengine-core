@@ -488,15 +488,18 @@ def test_a_reentrant_read_keeps_the_first_recorded_child():
     assert at_instant["again"] is outer and at_instant.again is outer
 
 
-def test_children_and_their_order_are_fixed_when_the_node_is_built():
+def test_children_changed_in_the_tree_show_until_read():
+    """Intended difference from the up-front build: a node held across a change
+    to its parameter node's children reflects it for children it has not read;
+    a child it has read keeps its value even if the tree drops it."""
     tree = plain_tree(x=10, y=20, z=30)
     held = tree.get_at_instant("2017-01-01")
     assert held.x == 10
     del tree.children["x"]
-    tree.children["w"] = ParameterNode("", data={"v": {"values": {"2010-01-01": 1}}})
-    assert list(held) == ["x", "y", "z"]
+    tree.add_child("w", ParameterNode("w", data={"v": {"values": {"2010-01-01": 1}}}))
     assert held.x == 10
-    assert "w" not in held._children
+    assert held.w.v == 1
+    assert list(held) == ["y", "z", "w", "x"]
 
 
 def test_a_node_pickled_when_every_child_was_built_up_front_loads():
