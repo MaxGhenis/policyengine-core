@@ -8,8 +8,13 @@ so results after subsampling depended on what had been calculated before.
 """
 
 import numpy as np
+import pytest
 
 from policyengine_core.reforms import Reform
+from policyengine_core.tools.simulation_dumper import (
+    dump_simulation,
+    restore_simulation,
+)
 from policyengine_core.variables import Variable
 from tests.fixtures.subsample_inputs import (
     DATASET_YEAR,
@@ -104,3 +109,53 @@ def test_formulas_run_on_the_subsample_after_subsample():
     )
     household_total = simulation.calculate("household_total", DATASET_YEAR)
     assert household_total.sum() == simulation.calculate("doubled", DATASET_YEAR).sum()
+
+
+def _delete_with_simulation(simulation):
+    simulation.delete_arrays("overridden", DATASET_YEAR)
+
+
+def _delete_with_holder(simulation):
+    # As policyengine-us's labour supply response does for the earnings it
+    # moves to an input-only twin.
+    simulation.get_holder("overridden").delete_arrays(DATASET_YEAR)
+
+
+@pytest.mark.parametrize("delete", [_delete_with_simulation, _delete_with_holder])
+def test_input_deleted_then_calculated_is_left_out(delete):
+    def subsampled(calculate_after_deleting):
+        simulation = build()
+        delete(simulation)
+        if calculate_after_deleting:
+            simulation.calculate("overridden", DATASET_YEAR)
+        simulation.subsample(n=4, seed=SEED, time_period=DATASET_YEAR)
+        return simulation
+
+    fresh = subsampled(calculate_after_deleting=False)
+    used = subsampled(calculate_after_deleting=True)
+    assert stored(used) == stored(fresh)
+    assert not any(name == "overridden" for name, _, _ in stored(used))
+    # The formula, not the value it gave before subsampling, runs again.
+    assert (
+        used.calculate("overridden", DATASET_YEAR).tolist()
+        == [-1.0] * used.persons.count
+    )
+
+
+def test_restored_simulation_subsamples_as_the_original_does(tmp_path):
+    original = build()
+    for variable in ("doubled", "household_total", "ended", "person_weight"):
+        original.calculate(variable, DATASET_YEAR)
+    directory = str(tmp_path / "dump")
+    dump_simulation(original, directory)
+    restored = restore_simulation(directory, original.tax_benefit_system)
+    # A dump does not hold the dataset ``subsample`` names its rebuild after.
+    restored.dataset = original.dataset
+
+    restored.subsample(n=4, seed=SEED, time_period=DATASET_YEAR)
+
+    assert stored(restored) == stored(subsampled())
+    assert (
+        restored.calculate("doubled", DATASET_YEAR).tolist()
+        == (2 * restored.calculate("base", DATASET_YEAR)).tolist()
+    )
