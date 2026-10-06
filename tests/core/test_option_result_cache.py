@@ -11,6 +11,11 @@ and over a month the year's. A plain read then returned 120 or 1 instead of
 
 import pytest
 
+from policyengine_core import periods
+from policyengine_core.tools.simulation_dumper import (
+    dump_simulation,
+    restore_simulation,
+)
 from tests.fixtures.option_caches import (
     DAY,
     FLOW,
@@ -174,3 +179,48 @@ def test_an_option_in_a_branch_does_not_replace_a_parent_input():
     branch = simulation.get_branch("other")
     assert run(branch, "add", "2012") == [sum(1200.0 + month for month in range(1, 13))]
     assert run(branch, "calculate", "2012") == [7.0]
+
+
+@pytest.mark.parametrize(
+    "definition_period, deleted, native, target, option, first, second",
+    [
+        (MONTH, "2012", "2012-01", "2012", "add", [12.0], [24.0]),
+        (YEAR, "2012-01", "2012", "2012-01", "divide", [1.0], [2.0]),
+    ],
+)
+def test_an_option_refreshes_its_aggregate_where_a_deleted_input_was(
+    definition_period, deleted, native, target, option, first, second
+):
+    # An input stored at the target itself, then deleted. The simulation's
+    # record of what ``set_input`` stored keeps it, but the value a plain
+    # read finds at the target afterwards is the aggregate the option
+    # cached, which is calculated: running the option again replaces it.
+    probe = make_probe(definition_period, FLOW, set_input=None)
+    simulation = build(probe, {deleted: 7})
+    simulation.delete_arrays(PROBE, deleted)
+    simulation.set_input(PROBE, native, [12])
+    assert run(simulation, option, target) == first
+    simulation.set_input(PROBE, native, [24])
+    assert run(simulation, option, target) == second
+    assert run(simulation, "calculate", target) == second
+
+
+@pytest.mark.parametrize(
+    "definition_period, stored, option, result",
+    [
+        (MONTH, "2012", "add", [sum(1200.0 + month for month in range(1, 13))]),
+        (YEAR, "2012-02", "divide", [pytest.approx(1012.0 / 12)]),
+    ],
+)
+def test_an_option_does_not_replace_an_input_restored_from_a_dump(
+    definition_period, stored, option, result, tmp_path
+):
+    # ``restore_simulation`` stores the dumped input with ``put_in_cache``,
+    # not ``set_input``: only the storage's input mark says it is one.
+    probe = make_probe(definition_period, FLOW, with_formula=True, set_input=None)
+    built = build(probe, {stored: 7})
+    dump_simulation(built, str(tmp_path / "dump"))
+    restored = restore_simulation(str(tmp_path / "dump"), built.tax_benefit_system)
+    assert run(restored, option, stored) == result
+    assert run(restored, "calculate", stored) == [7.0]
+    assert not restored.get_holder(PROBE).is_derived(periods.period(stored))
