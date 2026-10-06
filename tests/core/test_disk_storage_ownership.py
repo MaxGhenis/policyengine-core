@@ -141,9 +141,17 @@ def test_a_folder_the_caller_chose_is_made_if_it_does_not_exist(tmp_path):
     assert list(folder.iterdir()) == []
 
 
-def test_a_clone_stores_in_a_folder_the_caller_chose_that_does_not_exist(tmp_path):
-    """The clone stores first, so it makes the folder its own goes in."""
-    folder = tmp_path / "simulation"
+@pytest.mark.parametrize("in_a_simulations_folder", [False, True])
+def test_a_clone_stores_in_a_folder_the_caller_chose_that_does_not_exist(
+    tmp_path, in_a_simulations_folder
+):
+    """The clone stores first, so it makes the folder its own goes in, also
+    when that is in a temporary folder another simulation made."""
+    if in_a_simulations_folder:
+        owner = build_simulation()
+        folder = Path(owner.data_storage_dir) / "simulation"
+    else:
+        folder = tmp_path / "simulation"
     simulation = build_simulation()
     simulation._data_storage_dir = str(folder)
     clone = simulation.clone()
@@ -152,6 +160,133 @@ def test_a_clone_stores_in_a_folder_the_caller_chose_that_does_not_exist(tmp_pat
 
     assert Path(clone.data_storage_dir).parent == folder
     np.testing.assert_array_equal(clone.calculate("salary", PERIOD), [2.0])
+
+
+def test_the_folders_leading_to_a_folder_the_caller_chose_are_not_made(tmp_path):
+    """A folder on a disk that is not mounted, say, is not made elsewhere."""
+    simulation = build_simulation()
+    simulation._data_storage_dir = str(tmp_path / "missing" / "simulation")
+
+    with pytest.raises(FileNotFoundError):
+        simulation.set_input("salary", PERIOD, np.array([1.0]))
+
+    assert not (tmp_path / "missing").exists()
+
+
+_FORK_WITH_A_CHOSEN_FOLDER_NOT_MADE_YET = """
+    import gc, json, os, tempfile, traceback
+    import numpy as np
+    from tests.fixtures.disk_storage import build_simulation
+
+    chosen = os.path.join(tempfile.mkdtemp(), "chosen")
+    simulation = build_simulation()
+    simulation._data_storage_dir = chosen
+    report_r, report_w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        status = 1
+        try:
+            simulation.set_input("salary", "2017-01", np.array([1.0]))
+            storage_dir = simulation.get_holder("salary")._disk_storage.storage_dir
+            report = {
+                "in the chosen folder": os.path.dirname(os.path.dirname(storage_dir))
+                == chosen,
+                "value": simulation.calculate("salary", "2017-01").tolist(),
+            }
+            del simulation
+            gc.collect()
+            os.write(report_w, json.dumps(report).encode())
+            status = 0
+        except BaseException:
+            traceback.print_exc()
+        finally:
+            os._exit(status)
+    os.close(report_w)
+    child = json.loads(os.read(report_r, 256).decode() or "null")
+    _, status = os.waitpid(pid, 0)
+    print(json.dumps({"status": os.waitstatus_to_exitcode(status), "child": child}))
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+def test_a_forked_process_makes_a_folder_the_caller_chose_that_does_not_exist(
+    tmp_path,
+):
+    """It stores in a folder of its own inside it, as when the folder exists,
+    rather than in the default temporary folder."""
+    printed = run_in_new_interpreter(
+        _FORK_WITH_A_CHOSEN_FOLDER_NOT_MADE_YET, tmp_path, NUMEXPR_MAX_THREADS="1"
+    )
+
+    assert json.loads(printed.splitlines()[-1]) == {
+        "status": 0,
+        "child": {"in the chosen folder": True, "value": [1.0]},
+    }
+
+
+_FORK_THEN_THE_PARENT_REMOVES_ITS_FOLDER = """
+    import gc, json, os, traceback
+    import numpy as np
+    from tests.fixtures.disk_storage import build_simulation
+
+    simulation = build_simulation()
+    folder = simulation.data_storage_dir
+    ready_r, ready_w = os.pipe()
+    go_r, go_w = os.pipe()
+    report_r, report_w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        status = 1
+        try:
+            # The child's own folder goes in the one it inherited; a clone's
+            # would too.
+            simulation.data_storage_dir
+            gc.collect()
+            clone = simulation.clone()
+            os.write(ready_w, b"x")
+            os.read(go_r, 1)
+            clone.set_input("salary", "2017-01", np.array([1.0]))
+            report = {
+                "value": clone.calculate("salary", "2017-01").tolist(),
+                "folder made again": os.path.exists(folder),
+            }
+            del clone
+            gc.collect()
+            os.write(report_w, json.dumps(report).encode())
+            status = 0
+        except BaseException:
+            traceback.print_exc()
+        finally:
+            os._exit(status)
+    os.close(ready_w)
+    os.close(report_w)
+    os.read(ready_r, 1)
+    del simulation
+    gc.collect()
+    removed = not os.path.exists(folder)
+    os.write(go_w, b"x")
+    child = json.loads(os.read(report_r, 256).decode() or "null")
+    _, status = os.waitpid(pid, 0)
+    print(json.dumps(
+        {"status": os.waitstatus_to_exitcode(status), "removed": removed, "child": child}
+    ))
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+def test_a_clone_in_a_forked_process_makes_no_folder_the_parent_removed(tmp_path):
+    """The parent's folder, made by a simulation and since removed, is not
+    made again, where nothing would remove it: the clone stores in the
+    default temporary folder instead."""
+    printed = run_in_new_interpreter(
+        _FORK_THEN_THE_PARENT_REMOVES_ITS_FOLDER, tmp_path, NUMEXPR_MAX_THREADS="1"
+    )
+
+    assert json.loads(printed.splitlines()[-1]) == {
+        "status": 0,
+        "removed": True,
+        "child": {"value": [1.0], "folder made again": False},
+    }
 
 
 # ----- Files nothing reads any more ----- #
@@ -175,6 +310,30 @@ def test_a_file_a_dropped_clone_wrote_is_removed_at_the_next_new_file(tmp_path):
         storage._files.values()
     )
     np.testing.assert_array_equal(storage.get(PERIOD), [3.0])
+
+
+def test_a_key_only_a_dropped_clone_stored_is_removed_at_the_next_new_file(
+    tmp_path,
+):
+    """A clone writes a key no storage of its family stored to a new file
+    too, so the family can remove it once the clone is collected."""
+    storage = OnDiskStorage(str(tmp_path / "salary"))
+    os.mkdir(storage.storage_dir)
+    storage.put(np.array([1.0]), PERIOD)
+    clone = storage.clone()
+    clone.put(np.array([2.0]), "2017-02")
+    assert len(_replacements(storage)) == 1
+
+    del clone
+    gc.collect()
+    storage.put(np.array([3.0]), PERIOD)
+
+    (written,) = _replacements(storage)
+    assert written.startswith(f"default_{PERIOD}.")
+    assert sorted(os.listdir(storage.storage_dir)) == [
+        f"default_{PERIOD}.npy",
+        REPLACEMENTS_DIR,
+    ]
 
 
 def test_a_file_a_clone_reads_stays_after_the_storage_that_wrote_it_drops_it(
@@ -284,18 +443,23 @@ def test_repeated_derivatives_and_reforms_leave_a_steady_number_of_files():
     assert counts[1:] == [counts[1]] * 5, counts
 
 
-def test_branches_made_and_dropped_again_and_again_leave_a_steady_number_of_files():
+@pytest.mark.parametrize("new_names", [False, True], ids=["same_name", "new_names"])
+def test_branches_made_and_dropped_again_and_again_leave_a_steady_number_of_files(
+    new_names,
+):
     simulation = build_simulation()
     simulation.set_input("salary", PERIOD, np.array([3_000.0]))
     simulation.calculate("disposable_income", PERIOD)
     counts = []
 
     for cycle in range(6):
-        branch = simulation.get_branch("branch")
+        # A branch's name is part of the keys it stores under.
+        name = f"branch_{cycle}" if new_names else "branch"
+        branch = simulation.get_branch(name)
         branch.set_input("salary", PERIOD, np.array([3_000.0 + cycle]))
         branch.calculate("disposable_income", PERIOD)
         del branch
-        _drop_branch(simulation, "branch")
+        _drop_branch(simulation, name)
         simulation.apply_reform({"taxes.income_tax_rate": (0.1, 0.2)[cycle % 2]})
         simulation.calculate("disposable_income", PERIOD)
         gc.collect()
