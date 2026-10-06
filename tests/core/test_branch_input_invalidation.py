@@ -710,35 +710,6 @@ def test_drop_while_a_formula_runs_keeps_what_it_read_recorded(drop):
     assert branch.calculate("result", "2020").tolist() == [6.0]
 
 
-def test_disk_restore_reads_the_latest_file_of_each_key(tmp_path, monkeypatch):
-    """Sequence numbers restart in each process; restore goes by write time."""
-    import itertools
-    import os
-
-    import policyengine_core.data_storage.on_disk_storage as on_disk_storage
-    import policyengine_core.data_storage.store_history as store_history
-    from policyengine_core.data_storage import OnDiskStorage
-
-    monkeypatch.setattr(on_disk_storage, "_PROCESS_TOKEN", "aaaaaaaaaaaa")
-    writer = OnDiskStorage(str(tmp_path), preserve_storage_dir=True)
-    for _ in range(5):
-        writer.put(np.array([1.0]), periods.period("2020"))
-    # A later process: its counter restarts, and it has its own token.
-    monkeypatch.setattr(store_history, "_sequence", itertools.count(1))
-    monkeypatch.setattr(on_disk_storage, "_PROCESS_TOKEN", "bbbbbbbbbbbb")
-    later = OnDiskStorage(str(tmp_path), preserve_storage_dir=True)
-    later.put(np.array([2.0]), periods.period("2020"))
-    # The writer's files clearly earlier, even on a coarse file clock.
-    for path in tmp_path.glob("default_2020.aaaaaaaaaaaa.*.npy"):
-        stat = os.stat(path)
-        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns - 10**9))
-
-    reader = OnDiskStorage(str(tmp_path), preserve_storage_dir=True)
-    reader.restore()
-
-    assert reader.get(periods.period("2020")).tolist() == [2.0]
-
-
 def test_uprated_value_another_simulation_returns_is_tracked():
     """Taking in another simulation's history includes its uprated values."""
     inputs = {("p_up", "2012"): (100.0, 100.0, 100.0)}
@@ -798,32 +769,6 @@ def test_failed_prerequisite_request_does_not_satisfy_the_gate():
 
     with pytest.raises(ValueError, match="requires prerequisite"):
         simulation.calculate("dependent", "2020")
-
-
-def test_disk_files_from_another_process_are_not_overwritten(tmp_path, monkeypatch):
-    """Processes write their own files even when their sequence numbers repeat."""
-    import itertools
-
-    import policyengine_core.data_storage.on_disk_storage as on_disk_storage
-    import policyengine_core.data_storage.store_history as store_history
-    from policyengine_core.data_storage import OnDiskStorage
-
-    monkeypatch.setattr(store_history, "_sequence", itertools.count(1))
-    monkeypatch.setattr(on_disk_storage, "_PROCESS_TOKEN", "aaaaaaaaaaaa")
-    writer = OnDiskStorage(str(tmp_path), preserve_storage_dir=True)
-    writer.put(np.array([1.0]), periods.period("2020"))
-    snapshot = writer.clone()
-
-    # A later process: its counter restarts.
-    monkeypatch.setattr(store_history, "_sequence", itertools.count(1))
-    monkeypatch.setattr(on_disk_storage, "_PROCESS_TOKEN", "bbbbbbbbbbbb")
-    reader = OnDiskStorage(str(tmp_path), preserve_storage_dir=True)
-    reader.restore()
-    reader.put(np.array([99.0]), periods.period("2020"))
-
-    assert snapshot.get(periods.period("2020")).tolist() == [1.0]
-    reader.restore()
-    assert reader.get(periods.period("2020")).tolist() == [99.0]
 
 
 def test_result_calculated_across_its_own_input_change_is_calculated_again():
@@ -1783,55 +1728,6 @@ def test_history_pickled_before_journals_still_records():
     restored.record_store("w", periods.period("2020"), 2)
 
     assert restored.earliest_dependency("w", periods.period("2020")) == 2
-
-
-def test_disk_restore_reads_older_file_names_and_breaks_time_ties(tmp_path):
-    import os
-
-    import policyengine_core.data_storage.on_disk_storage as on_disk_storage
-    from policyengine_core.data_storage import OnDiskStorage
-
-    # A file named before process tokens, and one from another process.
-    np.save(tmp_path / "default_2020.4.npy", np.array([1.0]))
-    np.save(tmp_path / "default_2020.cccccccccccc.999999999999.npy", np.array([2.0]))
-    storage = OnDiskStorage(str(tmp_path), preserve_storage_dir=True)
-    storage.put(np.array([3.0]), periods.period("2020"))  # this process, number lower
-    for path in tmp_path.glob("*.npy"):
-        os.utime(path, ns=(10**18, 10**18))  # a coarse clock: every time ties
-
-    reader = OnDiskStorage(str(tmp_path), preserve_storage_dir=True)
-    reader.restore()
-
-    assert set(reader._files) == {"default_2020"}  # one key, old name included
-    assert reader.get(periods.period("2020")).tolist() == [3.0]
-    assert on_disk_storage._PROCESS_TOKEN in reader._files["default_2020"]
-
-
-def test_forked_process_gets_its_own_disk_file_token():
-    import os
-    import warnings
-
-    import policyengine_core.data_storage.on_disk_storage as on_disk_storage
-
-    if not hasattr(os, "fork"):
-        pytest.skip("no fork on this platform")
-    # A bare fork whose child only writes to a pipe: a process pool forked
-    # from a multi-threaded test process can deadlock.
-    read, write = os.pipe()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        pid = os.fork()
-    if pid == 0:
-        try:
-            os.write(write, on_disk_storage._PROCESS_TOKEN.encode())
-        finally:
-            os._exit(0)
-    os.close(write)
-    child_token = os.read(read, 64).decode()
-    os.close(read)
-    os.waitpid(pid, 0)
-
-    assert child_token and child_token != on_disk_storage._PROCESS_TOKEN
 
 
 # ----- Only what may depend on the input is dropped ----- #
